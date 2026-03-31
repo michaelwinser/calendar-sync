@@ -211,6 +211,13 @@ const homePage = `<!DOCTYPE html>
         }
         .color-text-opt input { display: none; }
         .color-text-active { background: #ddd; border-color: #999; }
+        .emoji-btn {
+            cursor: pointer;
+            font-size: 1.1rem;
+            padding: 1px 3px;
+            border-radius: 3px;
+        }
+        .emoji-btn:hover { background: #e0e0e0; }
         .hub-row { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem; }
         .hub-current { font-weight: 500; margin-bottom: 0.5rem; }
         #status { margin-top: 0.5rem; color: #666; font-size: 0.9rem; }
@@ -360,6 +367,11 @@ const homePage = `<!DOCTYPE html>
         });
     }
 
+    function setPrefix(calId, emoji) {
+        const input = document.getElementById('prefix-' + calId);
+        if (input) input.value = emoji;
+    }
+
     function onCheckboxChange(calId, isChecked) {
         // Save current input values before re-render
         saveLocalInputs();
@@ -410,10 +422,23 @@ const homePage = `<!DOCTYPE html>
             if (isChecked) {
                 html += '<div style="margin-left:1.5rem;margin-top:0.3rem;font-size:0.85rem">';
 
-                // Prefix input
-                html += '<div style="margin-bottom:0.3rem">';
-                html += '<label>Prefix: <input type="text" data-cal="' + cal.id + '" data-field="emoji" value="' +
-                    esc(opts.emojiPrefix) + '" style="width:8rem;padding:0.2rem" placeholder="e.g. [Sync] or 🔄"></label>';
+                // Prefix input with emoji quick-pick
+                html += '<div style="margin-bottom:0.3rem;display:flex;align-items:center;gap:0.3rem">';
+                html += '<label>Prefix: <input type="text" id="prefix-' + cal.id + '" data-cal="' + cal.id + '" data-field="emoji" value="' +
+                    esc(opts.emojiPrefix) + '" style="width:8rem;padding:0.2rem" placeholder="e.g. [Sync]"></label>';
+                var emojis = [
+                    {e: '🔄', t: 'Sync'},
+                    {e: '🔁', t: 'Repeat'},
+                    {e: '📅', t: 'Calendar'},
+                    {e: '📌', t: 'Pin'},
+                    {e: '🔗', t: 'Link'},
+                    {e: '⏳', t: 'Hourglass'},
+                    {e: '🪞', t: 'Mirror'},
+                    {e: '📋', t: 'Clipboard'},
+                ];
+                for (var ei of emojis) {
+                    html += '<span class="emoji-btn" title="' + ei.t + '" onclick="setPrefix(\'' + cal.id + '\',\'' + ei.e + '\')">' + ei.e + '</span>';
+                }
                 html += '</div>';
 
                 // Color picker: swatches only, tooltip on hover
