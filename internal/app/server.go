@@ -264,19 +264,20 @@ func (s *Server) TriggerSync(w http.ResponseWriter, r *http.Request) {
 
 	// Store refresh token for background sync (nudge endpoint)
 	if refreshToken := auth.RefreshToken(r); refreshToken != "" {
-		s.Store.UpdateRefreshToken(userID, refreshToken)
-	}
-
-	// Override sync window if days parameter is provided
-	if daysStr := r.URL.Query().Get("days"); daysStr != "" {
-		if days, err := strconv.Atoi(daysStr); err == nil && days > 0 {
-			cfg.SyncWindowWeeks = 0 // signal to use days directly
-			// Convert days to weeks for the sync engine (round up)
-			cfg.SyncWindowWeeks = (days + 6) / 7
+		if err := s.Store.UpdateRefreshToken(userID, refreshToken); err != nil {
+			log.Printf("failed to store refresh token: %v", err)
 		}
 	}
 
-	result, err := RunSync(r.Context(), token, s.Store, cfg, sources)
+	// Override sync window if days parameter is provided
+	syncDays := cfg.SyncWindowWeeks * 7
+	if daysStr := r.URL.Query().Get("days"); daysStr != "" {
+		if days, err := strconv.Atoi(daysStr); err == nil && days > 0 {
+			syncDays = days
+		}
+	}
+
+	result, err := RunSyncWithDays(r.Context(), token, s.Store, cfg, sources, syncDays)
 	if err != nil {
 		server.RespondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -470,17 +471,19 @@ func (s *Server) BulkDeleteEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 // NudgeSync triggers sync for all users who are due based on their schedule.
-// Auth: OIDC on Cloud Run (handled by infrastructure), or X-Nudge-Key header.
+// Auth: X-Nudge-Key header required (matches SYNC_NUDGE_KEY env var).
+// On Cloud Run, add OIDC at the infrastructure level as a second layer.
 // Registered at /sync/nudge (not /api/) to bypass session auth middleware.
 func (s *Server) NudgeSync(w http.ResponseWriter, r *http.Request) {
-	// Auth: check deployment key (skip if not configured — e.g. Cloud Run uses OIDC)
+	// Auth: always require deployment key
 	nudgeKey := os.Getenv("SYNC_NUDGE_KEY")
-	if nudgeKey != "" {
-		providedKey := r.Header.Get("X-Nudge-Key")
-		if providedKey != nudgeKey {
-			server.RespondError(w, http.StatusUnauthorized, "invalid nudge key")
-			return
-		}
+	if nudgeKey == "" {
+		server.RespondError(w, http.StatusServiceUnavailable, "SYNC_NUDGE_KEY not configured")
+		return
+	}
+	if r.Header.Get("X-Nudge-Key") != nudgeKey {
+		server.RespondError(w, http.StatusUnauthorized, "invalid nudge key")
+		return
 	}
 
 	configs, err := s.Store.GetAllConfigs()
@@ -489,16 +492,8 @@ func (s *Server) NudgeSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type userResult struct {
-		UserID  string      `json:"userId"`
-		Skipped bool        `json:"skipped,omitempty"`
-		Reason  string      `json:"reason,omitempty"`
-		Result  *SyncResult `json:"result,omitempty"`
-		Error   string      `json:"error,omitempty"`
-	}
-	var results []userResult
-
 	now := time.Now().UTC()
+	synced, skipped, errors := 0, 0, 0
 
 	for _, cfg := range configs {
 		// Check if sync is due
@@ -509,13 +504,8 @@ func (s *Server) NudgeSync(w http.ResponseWriter, r *http.Request) {
 				if interval <= 0 {
 					interval = 15
 				}
-				nextDue := lastSync.Add(time.Duration(interval) * time.Minute)
-				if now.Before(nextDue) {
-					results = append(results, userResult{
-						UserID:  cfg.UserID,
-						Skipped: true,
-						Reason:  fmt.Sprintf("not due until %s", nextDue.Format(time.RFC3339)),
-					})
+				if now.Before(lastSync.Add(time.Duration(interval) * time.Minute)) {
+					skipped++
 					continue
 				}
 			}
@@ -523,66 +513,47 @@ func (s *Server) NudgeSync(w http.ResponseWriter, r *http.Request) {
 
 		// Check refresh token
 		if cfg.RefreshToken == "" {
-			results = append(results, userResult{
-				UserID: cfg.UserID,
-				Error:  "no refresh token — user must login to authorize background sync",
-			})
+			log.Printf("nudge: user %s has no refresh token", cfg.UserID)
+			errors++
 			continue
 		}
 
-		// Get fresh access token from refresh token
+		// Get fresh access token
 		if s.Google == nil {
-			results = append(results, userResult{
-				UserID: cfg.UserID,
-				Error:  "Google auth not configured",
-			})
+			errors++
 			continue
 		}
-		session := &auth.Session{
-			RefreshToken: cfg.RefreshToken,
-		}
+		session := &auth.Session{RefreshToken: cfg.RefreshToken}
 		token, err := s.Google.RefreshAccessToken(r.Context(), session)
 		if err != nil {
-			results = append(results, userResult{
-				UserID: cfg.UserID,
-				Error:  "token refresh failed: " + err.Error(),
-			})
+			log.Printf("nudge: token refresh failed for user %s: %v", cfg.UserID, err)
+			errors++
 			continue
 		}
 
-		// Update stored refresh token if it changed during refresh
 		if session.RefreshToken != cfg.RefreshToken {
 			s.Store.UpdateRefreshToken(cfg.UserID, session.RefreshToken)
 		}
 
-		// Get sources
 		sources, err := s.Store.GetSources(cfg.UserID)
 		if err != nil || len(sources) == 0 {
-			results = append(results, userResult{
-				UserID:  cfg.UserID,
-				Skipped: true,
-				Reason:  "no source calendars",
-			})
+			skipped++
 			continue
 		}
 
-		// Run sync
-		result, err := RunSync(r.Context(), token, s.Store, &cfg, sources)
-		if err != nil {
-			results = append(results, userResult{
-				UserID: cfg.UserID,
-				Error:  err.Error(),
-			})
+		syncDays := cfg.SyncWindowWeeks * 7
+		if _, err := RunSyncWithDays(r.Context(), token, s.Store, &cfg, sources, syncDays); err != nil {
+			log.Printf("nudge: sync failed for user %s: %v", cfg.UserID, err)
+			errors++
 			continue
 		}
-		results = append(results, userResult{
-			UserID: cfg.UserID,
-			Result: result,
-		})
+		synced++
 	}
 
 	server.RespondJSON(w, http.StatusOK, map[string]interface{}{
-		"users":   len(configs),
-		"results": results,
+		"total":   len(configs),
+		"synced":  synced,
+		"skipped": skipped,
+		"errors":  errors,
 	})
 }

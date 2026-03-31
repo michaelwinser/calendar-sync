@@ -25,9 +25,16 @@ type SyncResult struct {
 	Message string `json:"message"`
 }
 
-// RunSync executes a full sync pass for the given user.
-// It syncs events from each source calendar to the hub calendar.
+// RunSync executes a full sync pass using the configured sync window.
 func RunSync(ctx context.Context, token string, store *Store, config *SyncConfig, sources []SourceCalendar) (*SyncResult, error) {
+	return RunSyncWithDays(ctx, token, store, config, sources, config.SyncWindowWeeks*7)
+}
+
+// RunSyncWithDays executes a full sync pass with an explicit window in days.
+func RunSyncWithDays(ctx context.Context, token string, store *Store, config *SyncConfig, sources []SourceCalendar, syncDays int) (*SyncResult, error) {
+	if syncDays <= 0 {
+		syncDays = 56 // default 8 weeks
+	}
 	// Concurrent sync guard
 	running, err := store.GetRunningSyncLog(config.UserID)
 	if err != nil {
@@ -51,7 +58,7 @@ func RunSync(ctx context.Context, token string, store *Store, config *SyncConfig
 
 	// Phase 1: Inbound — sync each source calendar to the hub
 	for _, source := range sources {
-		err := syncSourceToHub(ctx, token, store, config, &source, result)
+		err := syncSourceToHub(ctx, token, store, config, &source, syncDays, result)
 		if err != nil {
 			log.Printf("inbound sync error for %s: %v", source.CalendarName, err)
 			result.Errors++
@@ -97,16 +104,12 @@ func RunSync(ctx context.Context, token string, store *Store, config *SyncConfig
 	return result, nil
 }
 
-func syncSourceToHub(ctx context.Context, token string, store *Store, config *SyncConfig, source *SourceCalendar, result *SyncResult) error {
+func syncSourceToHub(ctx context.Context, token string, store *Store, config *SyncConfig, source *SourceCalendar, syncDays int, result *SyncResult) error {
 	hubCalID := config.HubCalendarID
-	syncWindow := config.SyncWindowWeeks
-	if syncWindow <= 0 {
-		syncWindow = 8
-	}
 
 	now := time.Now().UTC()
 	timeMin := now
-	timeMax := now.Add(time.Duration(syncWindow) * 7 * 24 * time.Hour)
+	timeMax := now.Add(time.Duration(syncDays) * 24 * time.Hour)
 
 	// 1. Fetch source events (incremental if syncToken available, else full)
 	var sourceEvents []GCalEvent
