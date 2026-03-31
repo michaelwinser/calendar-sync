@@ -176,6 +176,34 @@ const homePage = `<!DOCTYPE html>
         .cal-list li { padding: 0.3rem 0; }
         .cal-list label { cursor: pointer; }
         .cal-list input[disabled] + span { color: #999; }
+        .color-swatch {
+            display: inline-block;
+            width: 20px; height: 20px;
+            border-radius: 3px;
+            cursor: pointer;
+            position: relative;
+        }
+        .color-swatch:hover::after {
+            content: attr(title);
+            position: absolute;
+            bottom: 100%%; left: 50%%;
+            transform: translateX(-50%%);
+            background: #333; color: white;
+            padding: 2px 6px; border-radius: 3px;
+            font-size: 0.75rem; white-space: nowrap;
+            margin-bottom: 4px; z-index: 1;
+        }
+        .color-swatch input { display: none; }
+        .color-text-opt {
+            cursor: pointer;
+            font-size: 0.8rem;
+            padding: 2px 6px;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+            background: #f7f7f7;
+        }
+        .color-text-opt input { display: none; }
+        .color-text-active { background: #ddd; border-color: #999; }
         .hub-row { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem; }
         .hub-current { font-weight: 500; margin-bottom: 0.5rem; }
         #status { margin-top: 0.5rem; color: #666; font-size: 0.9rem; }
@@ -344,18 +372,23 @@ const homePage = `<!DOCTYPE html>
                     esc(prefix) + '" style="width:8rem;padding:0.2rem" placeholder="e.g. [Sync] or 🔄"></label>';
                 html += '</div>';
 
-                // Color radio buttons with swatches
-                html += '<div style="display:flex;flex-wrap:wrap;gap:0.4rem;align-items:center">';
+                // Color picker: swatches only, tooltip on hover
+                html += '<div style="display:flex;gap:0.3rem;align-items:center;flex-wrap:wrap">';
                 html += '<span>Color: </span>';
                 for (const c of colorOptions) {
-                    const checked = color === c.id ? ' checked' : '';
-                    const swatch = c.color
-                        ? '<span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:' + c.color + ';vertical-align:middle;margin-right:2px"></span>'
-                        : '';
-                    html += '<label style="cursor:pointer;margin-right:0.2rem">' +
-                        '<input type="radio" name="color-' + cal.id + '" value="' + c.id + '"' + checked +
-                        ' data-cal="' + cal.id + '" data-field="color" style="margin:0 2px">' +
-                        swatch + c.label + '</label>';
+                    const isChecked = color === c.id;
+                    const checkedStyle = isChecked ? 'outline:2px solid #333;outline-offset:1px;' : '';
+                    if (c.color) {
+                        html += '<span class="color-swatch" style="background:' + c.color + ';' + checkedStyle + '" title="' + c.label + '">' +
+                            '<input type="radio" name="color-' + cal.id + '" value="' + c.id + '"' + (isChecked ? ' checked' : '') +
+                            ' data-cal="' + cal.id + '" data-field="color"></span>';
+                    } else {
+                        // Text options (default, source)
+                        html += '<label class="color-text-opt' + (isChecked ? ' color-text-active' : '') + '" title="' + c.label + '">' +
+                            '<input type="radio" name="color-' + cal.id + '" value="' + c.id + '"' + (isChecked ? ' checked' : '') +
+                            ' data-cal="' + cal.id + '" data-field="color">' +
+                            '<span>' + (c.id === '' ? 'Dest' : 'Src') + '</span></label>';
+                    }
                 }
                 html += '</div>';
 

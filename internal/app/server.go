@@ -257,10 +257,8 @@ func (s *Server) TriggerSync(w http.ResponseWriter, r *http.Request) {
 		server.RespondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if len(sources) == 0 {
-		server.RespondError(w, http.StatusBadRequest, "no source calendars configured")
-		return
-	}
+	// No check for empty sources — sync must still run with zero sources
+	// so the cleanup phase can delete placeholders from removed calendars.
 
 	token, err := getAccessToken(r, s.Google)
 	if err != nil {
@@ -542,10 +540,11 @@ func (s *Server) NudgeSync(w http.ResponseWriter, r *http.Request) {
 		}
 
 		sources, err := s.Store.GetSources(cfg.UserID)
-		if err != nil || len(sources) == 0 {
-			skipped++
+		if err != nil {
+			errors++
 			continue
 		}
+		// Allow zero sources — cleanup phase needs to run
 
 		syncDays := cfg.SyncWindowWeeks * 7
 		if _, err := RunSyncWithDays(r.Context(), token, s.Store, &cfg, sources, syncDays); err != nil {

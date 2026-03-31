@@ -12,6 +12,14 @@ eval "$(appbase dev-template)"
 APP_BINARY_NAME="calendar-sync"
 APP_E2E_DIR="e2e"
 
+# Override dev_ci to suppress lint-api noise (no openapi.yaml in this project)
+dev_ci() {
+    go vet ./...
+    go build -o "$APP_BINARY_NAME" .
+    go test -v -count=1 ./...
+    dev_e2e
+}
+
 dev_deploy() {
     # Sandbox gate: deploy needs cloud credentials that the sandbox correctly blocks
     if [ -n "$NONO_CAP_FILE" ]; then
