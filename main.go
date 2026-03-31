@@ -297,18 +297,19 @@ const homePage = `<!DOCTYPE html>
     }
 
     const colorOptions = [
-        {id: '', label: 'Default'},
-        {id: '1', label: 'Lavender'},
-        {id: '2', label: 'Sage'},
-        {id: '3', label: 'Grape'},
-        {id: '4', label: 'Flamingo'},
-        {id: '5', label: 'Banana'},
-        {id: '6', label: 'Tangerine'},
-        {id: '7', label: 'Peacock'},
-        {id: '8', label: 'Graphite'},
-        {id: '9', label: 'Blueberry'},
-        {id: '10', label: 'Basil'},
-        {id: '11', label: 'Tomato'},
+        {id: '', label: 'Same as destination', color: ''},
+        {id: 'source', label: 'Source calendar color', color: ''},
+        {id: '1', label: 'Lavender', color: '#7986cb'},
+        {id: '2', label: 'Sage', color: '#33b679'},
+        {id: '3', label: 'Grape', color: '#8e24aa'},
+        {id: '4', label: 'Flamingo', color: '#e67c73'},
+        {id: '5', label: 'Banana', color: '#f6bf26'},
+        {id: '6', label: 'Tangerine', color: '#f4511e'},
+        {id: '7', label: 'Peacock', color: '#039be5'},
+        {id: '8', label: 'Graphite', color: '#616161'},
+        {id: '9', label: 'Blueberry', color: '#3f51b5'},
+        {id: '10', label: 'Basil', color: '#0b8043'},
+        {id: '11', label: 'Tomato', color: '#d50000'},
     ];
 
     function renderSources() {
@@ -327,23 +328,37 @@ const homePage = `<!DOCTYPE html>
             const src = sourceMap[cal.id];
             const checked = src ? ' checked' : '';
             const label = esc(cal.name) + (cal.primary ? ' (primary)' : '');
-            const emoji = src ? (src.emojiPrefix || '') : '';
+            const prefix = src ? (src.emojiPrefix || '') : '';
             const color = src ? (src.colorId || '') : '';
 
             html += '<li style="padding:0.4rem 0">';
             html += '<label><input type="checkbox" value="' + cal.id + '"' + checked +
                 ' data-name="' + esc(cal.name) + '"> <span>' + label + '</span></label>';
 
-            // Show options only for checked calendars
             if (src) {
-                html += '<div style="margin-left:1.5rem;margin-top:0.3rem;font-size:0.85rem;display:flex;gap:0.75rem;align-items:center">';
-                html += '<label>Emoji: <input type="text" data-cal="' + cal.id + '" data-field="emoji" value="' +
-                    esc(emoji) + '" style="width:3rem;padding:0.2rem" placeholder="e.g. 🔄"></label>';
-                html += '<label>Color: <select data-cal="' + cal.id + '" data-field="color">';
+                html += '<div style="margin-left:1.5rem;margin-top:0.3rem;font-size:0.85rem">';
+
+                // Prefix input
+                html += '<div style="margin-bottom:0.3rem">';
+                html += '<label>Prefix: <input type="text" data-cal="' + cal.id + '" data-field="emoji" value="' +
+                    esc(prefix) + '" style="width:8rem;padding:0.2rem" placeholder="e.g. [Sync] or 🔄"></label>';
+                html += '</div>';
+
+                // Color radio buttons with swatches
+                html += '<div style="display:flex;flex-wrap:wrap;gap:0.4rem;align-items:center">';
+                html += '<span>Color: </span>';
                 for (const c of colorOptions) {
-                    html += '<option value="' + c.id + '"' + (color === c.id ? ' selected' : '') + '>' + c.label + '</option>';
+                    const checked = color === c.id ? ' checked' : '';
+                    const swatch = c.color
+                        ? '<span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:' + c.color + ';vertical-align:middle;margin-right:2px"></span>'
+                        : '';
+                    html += '<label style="cursor:pointer;margin-right:0.2rem">' +
+                        '<input type="radio" name="color-' + cal.id + '" value="' + c.id + '"' + checked +
+                        ' data-cal="' + cal.id + '" data-field="color" style="margin:0 2px">' +
+                        swatch + c.label + '</label>';
                 }
-                html += '</select></label>';
+                html += '</div>';
+
                 html += '</div>';
             }
 
@@ -391,13 +406,13 @@ const homePage = `<!DOCTYPE html>
         checkboxes.forEach(cb => {
             if (cb.checked) {
                 const calId = cb.value;
-                const emojiInput = document.querySelector('input[data-cal="' + calId + '"][data-field="emoji"]');
-                const colorSelect = document.querySelector('select[data-cal="' + calId + '"][data-field="color"]');
+                const prefixInput = document.querySelector('input[data-cal="' + calId + '"][data-field="emoji"]');
+                const colorRadio = document.querySelector('input[name="color-' + calId + '"]:checked');
                 config.sources.push({
                     calendarId: calId,
                     calendarName: cb.dataset.name,
-                    emojiPrefix: emojiInput ? emojiInput.value : '',
-                    colorId: colorSelect ? colorSelect.value : '',
+                    emojiPrefix: prefixInput ? prefixInput.value : '',
+                    colorId: colorRadio ? colorRadio.value : '',
                 });
             }
         });

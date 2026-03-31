@@ -624,7 +624,10 @@ func BuildPlaceholder(source GCalEvent, sourceCalID string, opts PlaceholderOpti
 		},
 	}
 
-	if opts.ColorID != "" {
+	if opts.ColorID == "source" {
+		// Use the source event's color (if it has one)
+		p.ColorID = source.ColorID
+	} else if opts.ColorID != "" {
 		p.ColorID = opts.ColorID
 	}
 
