@@ -279,6 +279,7 @@ const homePage = `<!DOCTYPE html>
             }
             calendars = await calRes.json();
             if (cfgRes.ok) config = await cfgRes.json();
+            initLocalState();
             render();
         } catch (e) {
             document.getElementById('hub-display').innerHTML =
@@ -340,10 +341,45 @@ const homePage = `<!DOCTYPE html>
         {id: '11', label: 'Tomato', color: '#d50000'},
     ];
 
+    // Track locally checked calendars so options show before Apply
+    let localChecked = new Set();
+    let localOptions = {}; // calId -> {emojiPrefix, colorId}
+
+    function initLocalState() {
+        localChecked = new Set(config.sources.map(s => s.calendarId));
+        localOptions = {};
+        config.sources.forEach(s => {
+            localOptions[s.calendarId] = { emojiPrefix: s.emojiPrefix || '', colorId: s.colorId || '' };
+        });
+    }
+
+    function onCheckboxChange(calId, isChecked) {
+        // Save current input values before re-render
+        saveLocalInputs();
+        if (isChecked) {
+            localChecked.add(calId);
+            if (!localOptions[calId]) localOptions[calId] = { emojiPrefix: '', colorId: '' };
+        } else {
+            localChecked.delete(calId);
+        }
+        renderSources();
+    }
+
+    function saveLocalInputs() {
+        for (const calId of localChecked) {
+            const prefixInput = document.querySelector('input[data-cal="' + calId + '"][data-field="emoji"]');
+            const colorRadio = document.querySelector('input[name="color-' + calId + '"]:checked');
+            if (prefixInput || colorRadio) {
+                localOptions[calId] = {
+                    emojiPrefix: prefixInput ? prefixInput.value : '',
+                    colorId: colorRadio ? colorRadio.value : '',
+                };
+            }
+        }
+    }
+
     function renderSources() {
         const el = document.getElementById('sources-display');
-        const sourceMap = {};
-        config.sources.forEach(s => sourceMap[s.calendarId] = s);
 
         const available = calendars.filter(c => c.id !== config.hubCalendarId);
         if (available.length === 0) {
@@ -353,30 +389,31 @@ const homePage = `<!DOCTYPE html>
 
         let html = '<ul class="cal-list">';
         for (const cal of available) {
-            const src = sourceMap[cal.id];
-            const checked = src ? ' checked' : '';
+            const isChecked = localChecked.has(cal.id);
+            const checked = isChecked ? ' checked' : '';
             const label = esc(cal.name) + (cal.primary ? ' (primary)' : '');
-            const prefix = src ? (src.emojiPrefix || '') : '';
-            const color = src ? (src.colorId || '') : '';
+            const opts = localOptions[cal.id] || { emojiPrefix: '', colorId: '' };
 
             html += '<li style="padding:0.4rem 0">';
             html += '<label><input type="checkbox" value="' + cal.id + '"' + checked +
-                ' data-name="' + esc(cal.name) + '"> <span>' + label + '</span></label>';
+                ' data-name="' + esc(cal.name) + '"' +
+                ' onchange="onCheckboxChange(\'' + cal.id + '\', this.checked)"' +
+                '> <span>' + label + '</span></label>';
 
-            if (src) {
+            if (isChecked) {
                 html += '<div style="margin-left:1.5rem;margin-top:0.3rem;font-size:0.85rem">';
 
                 // Prefix input
                 html += '<div style="margin-bottom:0.3rem">';
                 html += '<label>Prefix: <input type="text" data-cal="' + cal.id + '" data-field="emoji" value="' +
-                    esc(prefix) + '" style="width:8rem;padding:0.2rem" placeholder="e.g. [Sync] or 🔄"></label>';
+                    esc(opts.emojiPrefix) + '" style="width:8rem;padding:0.2rem" placeholder="e.g. [Sync] or 🔄"></label>';
                 html += '</div>';
 
                 // Color picker: swatches only, tooltip on hover
                 html += '<div style="display:flex;gap:0.3rem;align-items:center;flex-wrap:wrap">';
                 html += '<span>Color: </span>';
                 for (const c of colorOptions) {
-                    const isChecked = color === c.id;
+                    const isChecked = opts.colorId === c.id;
                     const checkedStyle = isChecked ? 'outline:2px solid #333;outline-offset:1px;' : '';
                     if (c.color) {
                         html += '<span class="color-swatch" style="background:' + c.color + ';' + checkedStyle + '" title="' + c.label + '">' +
@@ -416,6 +453,7 @@ const homePage = `<!DOCTYPE html>
             return false;
         }
         config = await res.json();
+        initLocalState();
         render();
         setStatus('Saved.');
         return true;
@@ -434,18 +472,18 @@ const homePage = `<!DOCTYPE html>
     }
 
     function applySources() {
-        const checkboxes = document.querySelectorAll('#sources-display input[type="checkbox"]');
+        saveLocalInputs();
         config.sources = [];
+        const checkboxes = document.querySelectorAll('#sources-display input[type="checkbox"]');
         checkboxes.forEach(cb => {
             if (cb.checked) {
                 const calId = cb.value;
-                const prefixInput = document.querySelector('input[data-cal="' + calId + '"][data-field="emoji"]');
-                const colorRadio = document.querySelector('input[name="color-' + calId + '"]:checked');
+                const opts = localOptions[calId] || { emojiPrefix: '', colorId: '' };
                 config.sources.push({
                     calendarId: calId,
                     calendarName: cb.dataset.name,
-                    emojiPrefix: prefixInput ? prefixInput.value : '',
-                    colorId: colorRadio ? colorRadio.value : '',
+                    emojiPrefix: opts.emojiPrefix,
+                    colorId: opts.colorId,
                 });
             }
         });

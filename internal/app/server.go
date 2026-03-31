@@ -386,13 +386,30 @@ func (s *Server) SearchEvents(w http.ResponseWriter, r *http.Request) {
 
 	var events []GCalEvent
 	if syncOnly {
-		// Fetch only events created by our sync engine
+		// Fetch all sync-engine placeholders, then filter by date client-side.
+		// (privateExtendedProperty + timeMin/timeMax don't combine reliably in the API)
 		all, err := ListAllPlaceholders(r.Context(), token, calendarID)
 		if err != nil {
 			server.RespondError(w, http.StatusBadGateway, "Google Calendar API: "+err.Error())
 			return
 		}
-		events = all
+		minDate := timeMin.Format("2006-01-02")
+		maxDate := timeMax.Format("2006-01-02")
+		for _, e := range all {
+			// Extract start date for comparison
+			startDate := e.Start.Date
+			if startDate == "" && e.Start.DateTime != "" {
+				if t, err := time.Parse(time.RFC3339, e.Start.DateTime); err == nil {
+					startDate = t.Format("2006-01-02")
+				}
+			}
+			if startDate == "" {
+				continue
+			}
+			if startDate >= minDate && startDate < maxDate {
+				events = append(events, e)
+			}
+		}
 	} else {
 		res, err := ListEvents(r.Context(), token, calendarID, timeMin, timeMax)
 		if err != nil {
