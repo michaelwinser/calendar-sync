@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -16,13 +17,31 @@ type hubEvent struct {
 	sourceEventID string
 }
 
+// CalendarCounts tracks sync operations for a single calendar.
+type CalendarCounts struct {
+	Created int `json:"created"`
+	Updated int `json:"updated"`
+	Deleted int `json:"deleted"`
+}
+
 // SyncResult holds the counts from a sync pass.
 type SyncResult struct {
-	Created int    `json:"created"`
-	Updated int    `json:"updated"`
-	Deleted int    `json:"deleted"`
-	Errors  int    `json:"errors"`
-	Message string `json:"message"`
+	Created    int                        `json:"created"`
+	Updated    int                        `json:"updated"`
+	Deleted    int                        `json:"deleted"`
+	Errors     int                        `json:"errors"`
+	Message    string                     `json:"message"`
+	PerCalendar map[string]*CalendarCounts `json:"perCalendar,omitempty"`
+}
+
+func (r *SyncResult) calCounts(name string) *CalendarCounts {
+	if r.PerCalendar == nil {
+		r.PerCalendar = make(map[string]*CalendarCounts)
+	}
+	if r.PerCalendar[name] == nil {
+		r.PerCalendar[name] = &CalendarCounts{}
+	}
+	return r.PerCalendar[name]
 }
 
 // SyncOptions controls sync behavior.
@@ -75,9 +94,20 @@ func RunSyncWithOptions(ctx context.Context, token string, store *Store, config 
 
 	result := &SyncResult{}
 
+	// snapshot takes a copy of current counts for delta calculation
+	snapshot := func() (int, int, int) { return result.Created, result.Updated, result.Deleted }
+	recordDelta := func(name string, c0, u0, d0 int) {
+		cc := result.calCounts(name)
+		cc.Created += result.Created - c0
+		cc.Updated += result.Updated - u0
+		cc.Deleted += result.Deleted - d0
+	}
+
 	// Phase 1: Inbound — sync each source calendar to the hub
 	for _, source := range sources {
+		c0, u0, d0 := snapshot()
 		err := syncSourceToHub(ctx, token, store, config, &source, syncDays, dryRun, result)
+		recordDelta(source.CalendarName, c0, u0, d0)
 		if err != nil {
 			log.Printf("inbound sync error for %s: %v", source.CalendarName, err)
 			result.Errors++
@@ -113,6 +143,11 @@ func RunSyncWithOptions(ctx context.Context, token string, store *Store, config 
 		syncLog.Status = "completed"
 		if result.Errors > 0 {
 			syncLog.Status = "completed_with_errors"
+		}
+		if result.PerCalendar != nil {
+			if detailsJSON, err := json.Marshal(result.PerCalendar); err == nil {
+				syncLog.Details = string(detailsJSON)
+			}
 		}
 		store.UpdateSyncLog(syncLog)
 		store.UpdateLastSyncAt(config.UserID)
@@ -353,10 +388,15 @@ func syncHubToSources(ctx context.Context, token string, store *Store, config *S
 
 	// For each source calendar, propagate hub events that didn't originate from it
 	for _, source := range sources {
+		c0, u0, d0 := result.Created, result.Updated, result.Deleted
 		if err := syncOutboundToSource(ctx, token, store, config, &source, hubEvents, dryRun, result); err != nil {
 			log.Printf("outbound sync error for %s: %v", source.CalendarName, err)
 			result.Errors++
 		}
+		cc := result.calCounts(source.CalendarName)
+		cc.Created += result.Created - c0
+		cc.Updated += result.Updated - u0
+		cc.Deleted += result.Deleted - d0
 	}
 
 	return nil

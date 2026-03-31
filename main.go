@@ -549,6 +549,18 @@ const homePage = `<!DOCTYPE html>
                 const counts = log.created + ' new, ' + log.updated + ' upd, ' + log.deleted + ' del';
                 const s = log.errors > 0 ? counts + ', ' + log.errors + ' err' : counts;
                 html += '<tr style="border-bottom:1px solid #eee"><td>' + t + '</td><td>' + s + '</td><td>' + log.status + '</td></tr>';
+                // Per-calendar breakdown
+                if (log.details) {
+                    try {
+                        const details = typeof log.details === 'string' ? JSON.parse(log.details) : log.details;
+                        for (const [cal, d] of Object.entries(details)) {
+                            if (d.created || d.updated || d.deleted) {
+                                const ds = d.created + ' new, ' + d.updated + ' upd, ' + d.deleted + ' del';
+                                html += '<tr style="border-bottom:1px solid #eee;color:#888"><td style="padding-left:1rem">' + esc(cal) + '</td><td>' + ds + '</td><td></td></tr>';
+                            }
+                        }
+                    } catch(e) {}
+                }
             }
             html += '</table>';
             el.innerHTML = html;
