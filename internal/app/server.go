@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,6 +58,8 @@ func (s *Server) RegisterRoutes(r chi.Router) {
 	r.Get("/api/config", s.GetConfig)
 	r.Put("/api/config", s.PutConfig)
 	r.Post("/api/sync", s.TriggerSync)
+	// NudgeSync is registered separately at /sync/nudge (not under /api/)
+	// to bypass the session auth middleware. It does its own auth.
 	r.Get("/api/sync/logs", s.ListSyncLogs)
 	r.Get("/api/sync/events", s.ListSyncedEvents)
 	r.Get("/api/status", s.Status)
@@ -95,10 +99,11 @@ func (s *Server) ListCalendars(w http.ResponseWriter, r *http.Request) {
 
 // configResponse is the JSON shape for GET /api/config.
 type configResponse struct {
-	HubCalendarID   string               `json:"hubCalendarId"`
-	HubCalendarName string               `json:"hubCalendarName"`
-	SyncWindowWeeks int                  `json:"syncWindowWeeks"`
-	Sources         []sourceCalendarView `json:"sources"`
+	HubCalendarID       string               `json:"hubCalendarId"`
+	HubCalendarName     string               `json:"hubCalendarName"`
+	SyncWindowWeeks     int                  `json:"syncWindowWeeks"`
+	SyncIntervalMinutes int                  `json:"syncIntervalMinutes"`
+	Sources             []sourceCalendarView `json:"sources"`
 }
 
 type sourceCalendarView struct {
@@ -127,13 +132,15 @@ func (s *Server) GetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := configResponse{
-		SyncWindowWeeks: 8,
-		Sources:         make([]sourceCalendarView, 0, len(sources)),
+		SyncWindowWeeks:     8,
+		SyncIntervalMinutes: 15,
+		Sources:             make([]sourceCalendarView, 0, len(sources)),
 	}
 	if cfg != nil {
 		resp.HubCalendarID = cfg.HubCalendarID
 		resp.HubCalendarName = cfg.HubCalendarName
 		resp.SyncWindowWeeks = cfg.SyncWindowWeeks
+		resp.SyncIntervalMinutes = cfg.SyncIntervalMinutes
 	}
 	for _, src := range sources {
 		resp.Sources = append(resp.Sources, sourceCalendarView{
@@ -147,10 +154,11 @@ func (s *Server) GetConfig(w http.ResponseWriter, r *http.Request) {
 
 // configRequest is the JSON shape for PUT /api/config.
 type configRequest struct {
-	HubCalendarID   string                `json:"hubCalendarId"`
-	HubCalendarName string                `json:"hubCalendarName"`
-	SyncWindowWeeks int                   `json:"syncWindowWeeks"`
-	Sources         []SourceCalendarInput `json:"sources"`
+	HubCalendarID       string                `json:"hubCalendarId"`
+	HubCalendarName     string                `json:"hubCalendarName"`
+	SyncWindowWeeks     int                   `json:"syncWindowWeeks"`
+	SyncIntervalMinutes int                   `json:"syncIntervalMinutes"`
+	Sources             []SourceCalendarInput `json:"sources"`
 }
 
 // PutConfig saves the user's full sync configuration.
@@ -167,10 +175,7 @@ func (s *Server) PutConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Default sync window
-	if req.SyncWindowWeeks <= 0 {
-		req.SyncWindowWeeks = 8
-	}
+	// Defaults handled by SaveConfig
 
 	// Validation: hub cannot be a source
 	for _, src := range req.Sources {
@@ -191,7 +196,12 @@ func (s *Server) PutConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Save config
-	cfg, err := s.Store.SaveConfig(userID, req.HubCalendarID, req.HubCalendarName, req.SyncWindowWeeks)
+	cfg, err := s.Store.SaveConfig(userID, SaveConfigInput{
+		HubCalendarID:       req.HubCalendarID,
+		HubCalendarName:     req.HubCalendarName,
+		SyncWindowWeeks:     req.SyncWindowWeeks,
+		SyncIntervalMinutes: req.SyncIntervalMinutes,
+	})
 	if err != nil {
 		server.RespondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -205,10 +215,11 @@ func (s *Server) PutConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := configResponse{
-		HubCalendarID:   cfg.HubCalendarID,
-		HubCalendarName: cfg.HubCalendarName,
-		SyncWindowWeeks: cfg.SyncWindowWeeks,
-		Sources:         make([]sourceCalendarView, 0, len(sources)),
+		HubCalendarID:       cfg.HubCalendarID,
+		HubCalendarName:     cfg.HubCalendarName,
+		SyncWindowWeeks:     cfg.SyncWindowWeeks,
+		SyncIntervalMinutes: cfg.SyncIntervalMinutes,
+		Sources:             make([]sourceCalendarView, 0, len(sources)),
 	}
 	for _, src := range sources {
 		resp.Sources = append(resp.Sources, sourceCalendarView{
@@ -249,6 +260,20 @@ func (s *Server) TriggerSync(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		server.RespondError(w, http.StatusForbidden, err.Error())
 		return
+	}
+
+	// Store refresh token for background sync (nudge endpoint)
+	if refreshToken := auth.RefreshToken(r); refreshToken != "" {
+		s.Store.UpdateRefreshToken(userID, refreshToken)
+	}
+
+	// Override sync window if days parameter is provided
+	if daysStr := r.URL.Query().Get("days"); daysStr != "" {
+		if days, err := strconv.Atoi(daysStr); err == nil && days > 0 {
+			cfg.SyncWindowWeeks = 0 // signal to use days directly
+			// Convert days to weeks for the sync engine (round up)
+			cfg.SyncWindowWeeks = (days + 6) / 7
+		}
 	}
 
 	result, err := RunSync(r.Context(), token, s.Store, cfg, sources)
@@ -441,5 +466,123 @@ func (s *Server) BulkDeleteEvents(w http.ResponseWriter, r *http.Request) {
 		"deleted": deleted,
 		"errors":  errors,
 		"message": fmt.Sprintf("Deleted %d events (%d errors)", deleted, errors),
+	})
+}
+
+// NudgeSync triggers sync for all users who are due based on their schedule.
+// Auth: OIDC on Cloud Run (handled by infrastructure), or X-Nudge-Key header.
+// Registered at /sync/nudge (not /api/) to bypass session auth middleware.
+func (s *Server) NudgeSync(w http.ResponseWriter, r *http.Request) {
+	// Auth: check deployment key (skip if not configured — e.g. Cloud Run uses OIDC)
+	nudgeKey := os.Getenv("SYNC_NUDGE_KEY")
+	if nudgeKey != "" {
+		providedKey := r.Header.Get("X-Nudge-Key")
+		if providedKey != nudgeKey {
+			server.RespondError(w, http.StatusUnauthorized, "invalid nudge key")
+			return
+		}
+	}
+
+	configs, err := s.Store.GetAllConfigs()
+	if err != nil {
+		server.RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	type userResult struct {
+		UserID  string      `json:"userId"`
+		Skipped bool        `json:"skipped,omitempty"`
+		Reason  string      `json:"reason,omitempty"`
+		Result  *SyncResult `json:"result,omitempty"`
+		Error   string      `json:"error,omitempty"`
+	}
+	var results []userResult
+
+	now := time.Now().UTC()
+
+	for _, cfg := range configs {
+		// Check if sync is due
+		if cfg.LastSyncAt != "" {
+			lastSync, err := time.Parse(time.RFC3339, cfg.LastSyncAt)
+			if err == nil {
+				interval := cfg.SyncIntervalMinutes
+				if interval <= 0 {
+					interval = 15
+				}
+				nextDue := lastSync.Add(time.Duration(interval) * time.Minute)
+				if now.Before(nextDue) {
+					results = append(results, userResult{
+						UserID:  cfg.UserID,
+						Skipped: true,
+						Reason:  fmt.Sprintf("not due until %s", nextDue.Format(time.RFC3339)),
+					})
+					continue
+				}
+			}
+		}
+
+		// Check refresh token
+		if cfg.RefreshToken == "" {
+			results = append(results, userResult{
+				UserID: cfg.UserID,
+				Error:  "no refresh token — user must login to authorize background sync",
+			})
+			continue
+		}
+
+		// Get fresh access token from refresh token
+		if s.Google == nil {
+			results = append(results, userResult{
+				UserID: cfg.UserID,
+				Error:  "Google auth not configured",
+			})
+			continue
+		}
+		session := &auth.Session{
+			RefreshToken: cfg.RefreshToken,
+		}
+		token, err := s.Google.RefreshAccessToken(r.Context(), session)
+		if err != nil {
+			results = append(results, userResult{
+				UserID: cfg.UserID,
+				Error:  "token refresh failed: " + err.Error(),
+			})
+			continue
+		}
+
+		// Update stored refresh token if it changed during refresh
+		if session.RefreshToken != cfg.RefreshToken {
+			s.Store.UpdateRefreshToken(cfg.UserID, session.RefreshToken)
+		}
+
+		// Get sources
+		sources, err := s.Store.GetSources(cfg.UserID)
+		if err != nil || len(sources) == 0 {
+			results = append(results, userResult{
+				UserID:  cfg.UserID,
+				Skipped: true,
+				Reason:  "no source calendars",
+			})
+			continue
+		}
+
+		// Run sync
+		result, err := RunSync(r.Context(), token, s.Store, &cfg, sources)
+		if err != nil {
+			results = append(results, userResult{
+				UserID: cfg.UserID,
+				Error:  err.Error(),
+			})
+			continue
+		}
+		results = append(results, userResult{
+			UserID: cfg.UserID,
+			Result: result,
+		})
+	}
+
+	server.RespondJSON(w, http.StatusOK, map[string]interface{}{
+		"users":   len(configs),
+		"results": results,
 	})
 }

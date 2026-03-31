@@ -11,13 +11,16 @@ import (
 // SyncConfig holds a user's sync configuration. One per user.
 // Uniqueness of user_id is enforced at the application layer.
 type SyncConfig struct {
-	ID              string `json:"id"              store:"id,pk"`
-	UserID          string `json:"userId"          store:"user_id,index"`
-	HubCalendarID   string `json:"hubCalendarId"   store:"hub_calendar_id"`
-	HubCalendarName string `json:"hubCalendarName" store:"hub_calendar_name"`
-	SyncWindowWeeks int    `json:"syncWindowWeeks" store:"sync_window_weeks"`
-	CreatedAt       string `json:"createdAt"       store:"created_at"`
-	UpdatedAt       string `json:"updatedAt"       store:"updated_at"`
+	ID                  string `json:"id"                  store:"id,pk"`
+	UserID              string `json:"userId"              store:"user_id,index"`
+	HubCalendarID       string `json:"hubCalendarId"       store:"hub_calendar_id"`
+	HubCalendarName     string `json:"hubCalendarName"     store:"hub_calendar_name"`
+	SyncWindowWeeks     int    `json:"syncWindowWeeks"     store:"sync_window_weeks"`
+	SyncIntervalMinutes int    `json:"syncIntervalMinutes" store:"sync_interval_minutes"`
+	RefreshToken        string `json:"-"                   store:"refresh_token"`
+	LastSyncAt          string `json:"-"                   store:"last_sync_at"`
+	CreatedAt           string `json:"createdAt"           store:"created_at"`
+	UpdatedAt           string `json:"updatedAt"           store:"updated_at"`
 }
 
 // SourceCalendar represents a calendar selected for synchronization.
@@ -98,9 +101,24 @@ func (s *Store) GetConfig(userID string) (*SyncConfig, error) {
 	return s.Configs.Where("user_id", "==", userID).First()
 }
 
+// SaveConfigInput holds the fields that can be set via the API.
+type SaveConfigInput struct {
+	HubCalendarID       string
+	HubCalendarName     string
+	SyncWindowWeeks     int
+	SyncIntervalMinutes int
+}
+
 // SaveConfig creates or updates the user's sync config.
-func (s *Store) SaveConfig(userID string, hubCalID, hubCalName string, syncWindowWeeks int) (*SyncConfig, error) {
+func (s *Store) SaveConfig(userID string, input SaveConfigInput) (*SyncConfig, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
+
+	if input.SyncWindowWeeks <= 0 {
+		input.SyncWindowWeeks = 8
+	}
+	if input.SyncIntervalMinutes <= 0 {
+		input.SyncIntervalMinutes = 15
+	}
 
 	existing, err := s.GetConfig(userID)
 	if err != nil {
@@ -108,9 +126,10 @@ func (s *Store) SaveConfig(userID string, hubCalID, hubCalName string, syncWindo
 	}
 
 	if existing != nil {
-		existing.HubCalendarID = hubCalID
-		existing.HubCalendarName = hubCalName
-		existing.SyncWindowWeeks = syncWindowWeeks
+		existing.HubCalendarID = input.HubCalendarID
+		existing.HubCalendarName = input.HubCalendarName
+		existing.SyncWindowWeeks = input.SyncWindowWeeks
+		existing.SyncIntervalMinutes = input.SyncIntervalMinutes
 		existing.UpdatedAt = now
 		if err := s.Configs.Update(existing.ID, existing); err != nil {
 			return nil, err
@@ -119,13 +138,14 @@ func (s *Store) SaveConfig(userID string, hubCalID, hubCalName string, syncWindo
 	}
 
 	cfg := &SyncConfig{
-		ID:              uuid.New().String(),
-		UserID:          userID,
-		HubCalendarID:   hubCalID,
-		HubCalendarName: hubCalName,
-		SyncWindowWeeks: syncWindowWeeks,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		ID:                  uuid.New().String(),
+		UserID:              userID,
+		HubCalendarID:       input.HubCalendarID,
+		HubCalendarName:     input.HubCalendarName,
+		SyncWindowWeeks:     input.SyncWindowWeeks,
+		SyncIntervalMinutes: input.SyncIntervalMinutes,
+		CreatedAt:           now,
+		UpdatedAt:           now,
 	}
 	if err := s.Configs.Create(cfg); err != nil {
 		return nil, err
@@ -192,6 +212,33 @@ func (s *Store) ReconcileSources(userID string, desired []SourceCalendarInput) (
 type SourceCalendarInput struct {
 	CalendarID   string `json:"calendarId"`
 	CalendarName string `json:"calendarName"`
+}
+
+// UpdateRefreshToken stores the user's Google refresh token for background sync.
+func (s *Store) UpdateRefreshToken(userID, refreshToken string) error {
+	cfg, err := s.GetConfig(userID)
+	if err != nil || cfg == nil {
+		return err
+	}
+	cfg.RefreshToken = refreshToken
+	cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return s.Configs.Update(cfg.ID, cfg)
+}
+
+// UpdateLastSyncAt records when the user's last sync completed.
+func (s *Store) UpdateLastSyncAt(userID string) error {
+	cfg, err := s.GetConfig(userID)
+	if err != nil || cfg == nil {
+		return err
+	}
+	cfg.LastSyncAt = time.Now().UTC().Format(time.RFC3339)
+	cfg.UpdatedAt = cfg.LastSyncAt
+	return s.Configs.Update(cfg.ID, cfg)
+}
+
+// GetAllConfigs returns all sync configs (for the nudge endpoint).
+func (s *Store) GetAllConfigs() ([]SyncConfig, error) {
+	return s.Configs.Where("hub_calendar_id", "!=", "").All()
 }
 
 // UpdateSourceSyncToken persists the syncToken for a source calendar.

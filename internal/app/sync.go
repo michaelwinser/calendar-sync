@@ -70,6 +70,9 @@ func RunSync(ctx context.Context, token string, store *Store, config *SyncConfig
 	// Phase 3: Cleanup — delete placeholders for removed source calendars
 	cleanupRemovedSources(ctx, token, store, config, sources, result)
 
+	// Phase 4: Cleanup — delete placeholders for past events (end date before today)
+	cleanupPastEvents(ctx, token, store, config, sources, result)
+
 	// Complete sync log
 	syncLog.CompletedAt = time.Now().UTC().Format(time.RFC3339)
 	syncLog.Created = result.Created
@@ -81,6 +84,9 @@ func RunSync(ctx context.Context, token string, store *Store, config *SyncConfig
 		syncLog.Status = "completed_with_errors"
 	}
 	store.UpdateSyncLog(syncLog)
+
+	// Record last sync time for nudge scheduling
+	store.UpdateLastSyncAt(config.UserID)
 
 	result.Message = fmt.Sprintf("Sync completed: %d created, %d updated, %d deleted",
 		result.Created, result.Updated, result.Deleted)
@@ -511,6 +517,70 @@ func cleanupRemovedSources(ctx context.Context, token string, store *Store, conf
 			log.Printf("cleanup: failed to delete synced event record: %v", err)
 		}
 		result.Deleted++
+	}
+}
+
+// cleanupPastEvents deletes placeholder events whose end date is before today.
+// Placeholders only exist to prevent meeting conflicts — past events don't need them.
+func cleanupPastEvents(ctx context.Context, token string, store *Store, config *SyncConfig, sources []SourceCalendar, result *SyncResult) {
+	today := time.Now().UTC().Truncate(24 * time.Hour).Format("2006-01-02")
+
+	allSynced, err := store.GetSyncedEventsForUser(config.UserID)
+	if err != nil {
+		log.Printf("past cleanup: failed to load synced events: %v", err)
+		return
+	}
+	if len(allSynced) == 0 {
+		return
+	}
+
+	// Collect all target calendar IDs to query for placeholders
+	targetCalIDs := make(map[string]bool)
+	targetCalIDs[config.HubCalendarID] = true
+	for _, s := range sources {
+		targetCalIDs[s.CalendarID] = true
+	}
+
+	// For each target calendar, find our placeholders and check end dates
+	for calID := range targetCalIDs {
+		placeholders, err := ListAllPlaceholders(ctx, token, calID)
+		if err != nil {
+			log.Printf("past cleanup: failed to list placeholders on %s: %v", calID, err)
+			continue
+		}
+
+		for _, p := range placeholders {
+			endDate := p.End.Date
+			if endDate == "" && p.End.DateTime != "" {
+				// Extract date from dateTime
+				t, err := time.Parse(time.RFC3339, p.End.DateTime)
+				if err != nil {
+					continue
+				}
+				endDate = t.UTC().Format("2006-01-02")
+			}
+			if endDate == "" || endDate >= today {
+				continue
+			}
+
+			// Past event — delete the placeholder
+			err := DeleteEvent(ctx, token, calID, p.ID)
+			if err != nil && !isNotFoundError(err) {
+				log.Printf("past cleanup: failed to delete %s: %v", p.ID, err)
+				result.Errors++
+				continue
+			}
+
+			// Remove the SyncedEvent record if one exists
+			srcEventID := SourceEventID(p)
+			for _, se := range allSynced {
+				if se.TargetEventID == p.ID || (se.TargetCalendarID == calID && se.SourceEventID == srcEventID) {
+					store.DeleteSyncedEvent(se.ID)
+					break
+				}
+			}
+			result.Deleted++
+		}
 	}
 }
 

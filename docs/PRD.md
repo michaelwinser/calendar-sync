@@ -70,6 +70,21 @@ Calendar Sync keeps a user's free/busy status consistent across multiple Google 
 | UC-0048 | Deleted placeholder is recreated | If a user manually deletes a placeholder event from any calendar, the next sync pass recreates it. The sync engine owns placeholders and keeps them consistent with the source. |
 | UC-0049 | Source removal cleans up all placeholders | When a source calendar is unchecked/removed from the config, the next sync pass deletes all placeholder events that originated from that calendar — on the hub and on all other source calendars. |
 
+### M5 — Polish and Automation
+
+| ID | Use Case | Description |
+|----|----------|-------------|
+| UC-0050 | Sync window parameter | `POST /api/sync` accepts a `days` query parameter to override the configured sync window. Defaults to `syncWindowWeeks * 7`. |
+| UC-0051 | Nudge endpoint for automated sync | `POST /api/sync/nudge` triggers sync for all users who are due based on their last sync time and configured interval. Auth: OIDC on Cloud Run, deployment key (`X-Nudge-Key`) on TrueNAS/localhost. |
+| UC-0052 | Stored refresh token for background sync | The user's Google refresh token is captured on login and stored in SyncConfig. The nudge endpoint uses it to get fresh access tokens without a browser session. |
+| UC-0053 | Past event auto-cleanup | At the end of each sync pass, placeholder events whose end date is before today are automatically deleted from the hub and all sync calendars. No configuration required. |
+| UC-0054 | Batch sync writes | Sync create/update/delete operations use Google's batch API (up to 50 per request) for improved performance. |
+| UC-0055 | Placeholder emoji prefix | Each sync calendar can have an optional emoji prefix that is prepended to placeholder event titles (e.g. "🔄 Team Standup"). Configured per-calendar in the UI. |
+| UC-0056 | Placeholder color | Each sync calendar can have a color assigned to its placeholder events using Google Calendar's predefined colorId values (1–11), or "default". Configured per-calendar in the UI. |
+| UC-0057 | Sync window control in UI | The sync window (in weeks) and sync interval (in minutes) are configurable via the UI. |
+| UC-0058 | Dry-run sync | The CLI `sync` command supports a `--dry-run` flag that reports what would change without making API writes. |
+| UC-0059 | Per-calendar sync log | Sync logs include per-calendar breakdowns of created/updated/deleted counts, shown in the UI. |
+
 ## Future Considerations
 
 The following are not in the current roadmap but are anticipated extensions:
@@ -103,3 +118,4 @@ Track implementation status here. E2e tests for all "done" use cases must pass i
 | M2 | UC-0010 – UC-0016 | done (UC-0010 manual only) |
 | M3 | UC-0020 – UC-0034 | done (UC-0020–UC-0028, UC-0031–UC-0034 manual only) |
 | M4 | UC-0040 – UC-0049 | done (UC-0040–UC-0049 manual only) |
+| M5 | UC-0050 – UC-0059 | not started |

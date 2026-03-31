@@ -54,6 +54,10 @@ func setup() error {
 	appSrv = &app.Server{Store: store, Google: a.Google()}
 	appSrv.RegisterRoutes(a.Router())
 
+	// Nudge endpoint — registered outside /api/ to bypass session auth middleware.
+	// Uses its own auth (deployment key or Cloud Run OIDC).
+	a.Router().Post("/sync/nudge", appSrv.NudgeSync)
+
 	return nil
 }
 
@@ -187,8 +191,32 @@ const homePage = `<!DOCTYPE html>
     </div>
 
     <div class="section">
-        <h2>Source Calendars</h2>
+        <h2>Sync Calendars</h2>
         <div id="sources-display"></div>
+    </div>
+
+    <div class="section">
+        <h2>Sync Settings</h2>
+        <div style="display:flex;gap:1rem;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap">
+            <label style="font-size:0.9rem">Window:
+                <select id="sync-window" onchange="saveSettings()">
+                    <option value="2">2 weeks</option>
+                    <option value="4">4 weeks</option>
+                    <option value="6">6 weeks</option>
+                    <option value="8" selected>8 weeks</option>
+                    <option value="12">12 weeks</option>
+                </select>
+            </label>
+            <label style="font-size:0.9rem">Auto-sync interval:
+                <select id="sync-interval" onchange="saveSettings()">
+                    <option value="5">5 min</option>
+                    <option value="10">10 min</option>
+                    <option value="15" selected>15 min</option>
+                    <option value="30">30 min</option>
+                    <option value="60">1 hour</option>
+                </select>
+            </label>
+        </div>
     </div>
 
     <div class="section">
@@ -208,7 +236,7 @@ const homePage = `<!DOCTYPE html>
 
     <script>
     let calendars = [];
-    let config = { hubCalendarId: '', hubCalendarName: '', syncWindowWeeks: 8, sources: [] };
+    let config = { hubCalendarId: '', hubCalendarName: '', syncWindowWeeks: 8, syncIntervalMinutes: 15, sources: [] };
 
     async function load() {
         try {
@@ -233,6 +261,20 @@ const homePage = `<!DOCTYPE html>
     function render() {
         renderHub();
         renderSources();
+        renderSettings();
+    }
+
+    function renderSettings() {
+        const windowSel = document.getElementById('sync-window');
+        const intervalSel = document.getElementById('sync-interval');
+        if (windowSel) windowSel.value = config.syncWindowWeeks || 8;
+        if (intervalSel) intervalSel.value = config.syncIntervalMinutes || 15;
+    }
+
+    async function saveSettings() {
+        config.syncWindowWeeks = parseInt(document.getElementById('sync-window').value) || 8;
+        config.syncIntervalMinutes = parseInt(document.getElementById('sync-interval').value) || 15;
+        saveConfig();
     }
 
     function renderHub() {
