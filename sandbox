@@ -1,0 +1,72 @@
+#!/bin/sh
+# Run a command inside a nono sandbox with project-specific capabilities.
+#
+# Usage:
+#   ./sandbox claude                    # Interactive Claude Code session
+#   ./sandbox ./dev ci                  # CI pipeline
+#   ./sandbox ./dev serve               # Dev server
+#
+# The sandbox provides:
+#   - Read+write: project directory, app data, Go module cache
+#   - Read-only:  Go toolchain
+#   - Port 4004:  bound (for dev server)
+
+set -e
+
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Graceful degradation: run unsandboxed if nono isn't installed
+if ! command -v nono >/dev/null 2>&1; then
+    echo "nono not found — running unsandboxed"
+    exec "$@"
+fi
+
+# --- Pre-sandbox environment setup ---
+
+# Ensure Go and homebrew are on PATH (nono doesn't source shell profiles)
+for p in /opt/homebrew/bin /usr/local/bin /usr/local/go/bin "$HOME/go/bin"; do
+    case ":$PATH:" in
+        *":$p:"*) ;;
+        *) [ -d "$p" ] && export PATH="$p:$PATH" ;;
+    esac
+done
+
+# Resolve Go binary location for sandbox allowlist
+GO_BIN_DIR=""
+if command -v go >/dev/null 2>&1; then
+    GO_BIN_DIR="$(dirname "$(command -v go)")"
+fi
+
+# Pre-resolve GOROOT so Go works inside the sandbox
+if command -v go >/dev/null 2>&1 && [ -z "$GOROOT" ]; then
+    export GOROOT="$(go env GOROOT)"
+fi
+
+# Determine if interactive (Claude Code, shell)
+EXEC_FLAG=""
+case "$1" in
+    claude|bash|zsh|sh|vim|nvim)
+        EXEC_FLAG="--exec"
+        ;;
+esac
+
+GO_FLAG=""
+if [ -n "$GO_BIN_DIR" ] && [ "$GO_BIN_DIR" != "/usr/bin" ]; then
+    GO_FLAG="--read $GO_BIN_DIR"
+fi
+
+# Suppress Docker config warning (nono blocks ~/.docker as a sensitive path — correct behavior)
+DOCKER_DIR="$PROJECT_DIR/.docker"
+mkdir -p "$DOCKER_DIR" 2>/dev/null
+[ -f "$DOCKER_DIR/config.json" ] || echo '{}' > "$DOCKER_DIR/config.json"
+export DOCKER_CONFIG="$DOCKER_DIR"
+
+exec nono run \
+    --profile claude-code \
+    --allow "$PROJECT_DIR" \
+    --allow "$HOME/.config/calendar-sync" \
+    --allow "$HOME/go" \
+    --allow-bind 4004 \
+    $GO_FLAG \
+    $EXEC_FLAG \
+    -- "$@"

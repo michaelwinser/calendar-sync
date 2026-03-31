@@ -1,0 +1,18 @@
+app:
+  name: calendar-sync
+config: {}
+secrets: {}
+environments:
+  dev:
+    config: {}
+  prod:
+    config: {}
+deploy:
+  truenas:
+    host: truenas.local
+    path: /mnt/pool/apps/{app}
+    compose_file: docker-compose.prod.yml
+  cloud-run:
+    project: ''
+    region: us-central1
+    service: calendar-sync

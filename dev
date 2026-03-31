@@ -1,0 +1,41 @@
+#!/bin/sh
+# calendar-sync project commands
+# Sources shared template from appbase — bug fixes propagate automatically.
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
+# Source shared dev functions from appbase CLI
+eval "$(appbase dev-template)"
+
+# App-specific settings
+APP_BINARY_NAME="calendar-sync"
+APP_E2E_DIR="e2e"
+
+dev_deploy() {
+    # Sandbox gate: deploy needs cloud credentials that the sandbox correctly blocks
+    if [ -n "$NONO_CAP_FILE" ]; then
+        echo "Error: deploy cannot run inside a nono sandbox."
+        echo "The sandbox blocks cloud credentials (~/.config/gcloud) by design."
+        echo "Run ./dev deploy directly, outside the sandbox."
+        return 1
+    fi
+
+    # Deploy gate: CI must pass before deploying
+    echo "Running CI checks before deploy..."
+    dev_ci || { echo "CI failed. Fix errors before deploying."; return 1; }
+
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "Working tree is dirty. Commit changes before deploying."
+        return 1
+    fi
+
+    echo "CI passed. Deploying..."
+    _load_secrets && appbase deploy
+}
+
+# Dispatch — add app-specific commands before the fallthrough
+case "${1:-help}" in
+    deploy)  dev_deploy ;;
+    *)       dev_dispatch "$@" ;;
+esac
