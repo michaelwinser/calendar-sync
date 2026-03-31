@@ -1,0 +1,39 @@
+services:
+  app:
+    build: .
+    ports:
+      - "${PORT:-4004}:4004"
+    volumes:
+      - app-data:/app/data
+    env_file: .env
+    environment:
+      - PORT=4004
+      - STORE_TYPE=sqlite
+      - SQLITE_DB_PATH=/app/data/app.db
+    restart: unless-stopped
+
+  cron:
+    image: alpine:3.21
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      - SYNC_NUDGE_KEY=${SYNC_NUDGE_KEY}
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        apk add --no-cache curl > /dev/null 2>&1
+        echo "Starting sync cron (nudge every 5 minutes)"
+        while true; do
+          echo "[$(date -Iseconds)] Nudging sync..."
+          curl -sf -X POST \
+            -H "X-Nudge-Key: $${SYNC_NUDGE_KEY}" \
+            http://app:4004/sync/nudge \
+            && echo " OK" || echo " FAILED"
+          sleep 300
+        done
+    restart: unless-stopped
+
+volumes:
+  app-data:

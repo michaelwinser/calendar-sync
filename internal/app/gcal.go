@@ -38,6 +38,7 @@ type GCalEvent struct {
 	Attendees          []Attendee         `json:"attendees,omitempty"`
 	Reminders          *Reminders         `json:"reminders,omitempty"`
 	ExtendedProperties *ExtendedProperties `json:"extendedProperties,omitempty"`
+	ColorID            string             `json:"colorId,omitempty"`
 	Updated            string             `json:"updated,omitempty"`
 	RecurringEventId   string             `json:"recurringEventId,omitempty"`
 	EventType          string             `json:"eventType,omitempty"` // default, workingLocation, outOfOffice, focusTime
@@ -583,8 +584,14 @@ func FormatAttendees(attendees []Attendee) string {
 	return strings.Join(parts, ", ")
 }
 
+// PlaceholderOptions configures how a placeholder event looks on the target calendar.
+type PlaceholderOptions struct {
+	EmojiPrefix string // prepended to title, e.g. "🔄 "
+	ColorID     string // Google Calendar colorId (1-11), empty for default
+}
+
 // BuildPlaceholder creates a placeholder event from a source event.
-func BuildPlaceholder(source GCalEvent, sourceCalID string) GCalEvent {
+func BuildPlaceholder(source GCalEvent, sourceCalID string, opts PlaceholderOptions) GCalEvent {
 	desc := source.Description
 	if len(source.Attendees) > 0 {
 		if desc != "" {
@@ -593,8 +600,13 @@ func BuildPlaceholder(source GCalEvent, sourceCalID string) GCalEvent {
 		desc += "---\nAttendees: " + FormatAttendees(source.Attendees)
 	}
 
-	return GCalEvent{
-		Summary:      source.Summary,
+	summary := source.Summary
+	if opts.EmojiPrefix != "" {
+		summary = opts.EmojiPrefix + " " + summary
+	}
+
+	p := GCalEvent{
+		Summary:      summary,
 		Description:  desc,
 		Location:     source.Location,
 		Start:        source.Start,
@@ -611,4 +623,10 @@ func BuildPlaceholder(source GCalEvent, sourceCalID string) GCalEvent {
 			},
 		},
 	}
+
+	if opts.ColorID != "" {
+		p.ColorID = opts.ColorID
+	}
+
+	return p
 }

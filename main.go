@@ -296,11 +296,26 @@ const homePage = `<!DOCTYPE html>
         el.innerHTML = html;
     }
 
+    const colorOptions = [
+        {id: '', label: 'Default'},
+        {id: '1', label: 'Lavender'},
+        {id: '2', label: 'Sage'},
+        {id: '3', label: 'Grape'},
+        {id: '4', label: 'Flamingo'},
+        {id: '5', label: 'Banana'},
+        {id: '6', label: 'Tangerine'},
+        {id: '7', label: 'Peacock'},
+        {id: '8', label: 'Graphite'},
+        {id: '9', label: 'Blueberry'},
+        {id: '10', label: 'Basil'},
+        {id: '11', label: 'Tomato'},
+    ];
+
     function renderSources() {
         const el = document.getElementById('sources-display');
-        const sourceIds = new Set(config.sources.map(s => s.calendarId));
+        const sourceMap = {};
+        config.sources.forEach(s => sourceMap[s.calendarId] = s);
 
-        // Show all calendars except the hub as checkboxes
         const available = calendars.filter(c => c.id !== config.hubCalendarId);
         if (available.length === 0) {
             el.innerHTML = '<p class="empty">No calendars available. Set a hub calendar first.</p>';
@@ -309,10 +324,30 @@ const homePage = `<!DOCTYPE html>
 
         let html = '<ul class="cal-list">';
         for (const cal of available) {
-            const checked = sourceIds.has(cal.id) ? ' checked' : '';
+            const src = sourceMap[cal.id];
+            const checked = src ? ' checked' : '';
             const label = esc(cal.name) + (cal.primary ? ' (primary)' : '');
-            html += '<li><label><input type="checkbox" value="' + cal.id + '"' + checked +
-                ' data-name="' + esc(cal.name) + '"> <span>' + label + '</span></label></li>';
+            const emoji = src ? (src.emojiPrefix || '') : '';
+            const color = src ? (src.colorId || '') : '';
+
+            html += '<li style="padding:0.4rem 0">';
+            html += '<label><input type="checkbox" value="' + cal.id + '"' + checked +
+                ' data-name="' + esc(cal.name) + '"> <span>' + label + '</span></label>';
+
+            // Show options only for checked calendars
+            if (src) {
+                html += '<div style="margin-left:1.5rem;margin-top:0.3rem;font-size:0.85rem;display:flex;gap:0.75rem;align-items:center">';
+                html += '<label>Emoji: <input type="text" data-cal="' + cal.id + '" data-field="emoji" value="' +
+                    esc(emoji) + '" style="width:3rem;padding:0.2rem" placeholder="e.g. 🔄"></label>';
+                html += '<label>Color: <select data-cal="' + cal.id + '" data-field="color">';
+                for (const c of colorOptions) {
+                    html += '<option value="' + c.id + '"' + (color === c.id ? ' selected' : '') + '>' + c.label + '</option>';
+                }
+                html += '</select></label>';
+                html += '</div>';
+            }
+
+            html += '</li>';
         }
         html += '</ul>';
         html += '<button onclick="applySources()">Apply</button>';
@@ -355,7 +390,15 @@ const homePage = `<!DOCTYPE html>
         config.sources = [];
         checkboxes.forEach(cb => {
             if (cb.checked) {
-                config.sources.push({ calendarId: cb.value, calendarName: cb.dataset.name });
+                const calId = cb.value;
+                const emojiInput = document.querySelector('input[data-cal="' + calId + '"][data-field="emoji"]');
+                const colorSelect = document.querySelector('select[data-cal="' + calId + '"][data-field="color"]');
+                config.sources.push({
+                    calendarId: calId,
+                    calendarName: cb.dataset.name,
+                    emojiPrefix: emojiInput ? emojiInput.value : '',
+                    colorId: colorSelect ? colorSelect.value : '',
+                });
             }
         });
         saveConfig();

@@ -30,6 +30,8 @@ type SourceCalendar struct {
 	UserID       string `json:"userId"       store:"user_id,index"`
 	CalendarID   string `json:"calendarId"   store:"calendar_id"`
 	CalendarName string `json:"calendarName" store:"calendar_name"`
+	EmojiPrefix  string `json:"emojiPrefix"  store:"emoji_prefix"`
+	ColorID      string `json:"colorId"      store:"color_id"`
 	SyncToken    string `json:"-"            store:"sync_token"`
 	CreatedAt    string `json:"createdAt"    store:"created_at"`
 }
@@ -187,15 +189,24 @@ func (s *Store) ReconcileSources(userID string, desired []SourceCalendarInput) (
 		}
 	}
 
-	// Add sources that are new
+	// Add new sources, update emoji/color on existing ones
 	now := time.Now().UTC().Format(time.RFC3339)
 	for _, d := range desired {
-		if _, ok := existingByCalID[d.CalendarID]; !ok {
+		if existing, ok := existingByCalID[d.CalendarID]; ok {
+			// Update emoji/color if changed
+			if existing.EmojiPrefix != d.EmojiPrefix || existing.ColorID != d.ColorID {
+				existing.EmojiPrefix = d.EmojiPrefix
+				existing.ColorID = d.ColorID
+				s.Sources.Update(existing.ID, &existing)
+			}
+		} else {
 			src := &SourceCalendar{
 				ID:           uuid.New().String(),
 				UserID:       userID,
 				CalendarID:   d.CalendarID,
 				CalendarName: d.CalendarName,
+				EmojiPrefix:  d.EmojiPrefix,
+				ColorID:      d.ColorID,
 				CreatedAt:    now,
 			}
 			if err := s.Sources.Create(src); err != nil {
@@ -212,6 +223,8 @@ func (s *Store) ReconcileSources(userID string, desired []SourceCalendarInput) (
 type SourceCalendarInput struct {
 	CalendarID   string `json:"calendarId"`
 	CalendarName string `json:"calendarName"`
+	EmojiPrefix  string `json:"emojiPrefix"`
+	ColorID      string `json:"colorId"`
 }
 
 // UpdateRefreshToken stores the user's Google refresh token for background sync.

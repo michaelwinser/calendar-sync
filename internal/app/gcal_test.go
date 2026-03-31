@@ -117,7 +117,7 @@ func TestBuildPlaceholder(t *testing.T) {
 		},
 	}
 
-	p := BuildPlaceholder(source, "work@example.com")
+	p := BuildPlaceholder(source, "work@example.com", PlaceholderOptions{})
 
 	// Fields copied
 	if p.Summary != "Team Standup" {
@@ -172,6 +172,33 @@ func TestBuildPlaceholder(t *testing.T) {
 	}
 }
 
+func TestBuildPlaceholderWithEmoji(t *testing.T) {
+	source := GCalEvent{ID: "src-1", Summary: "Meeting"}
+	p := BuildPlaceholder(source, "cal@x.com", PlaceholderOptions{EmojiPrefix: "🔄"})
+	if p.Summary != "🔄 Meeting" {
+		t.Errorf("Summary = %q, want %q", p.Summary, "🔄 Meeting")
+	}
+}
+
+func TestBuildPlaceholderWithColor(t *testing.T) {
+	source := GCalEvent{ID: "src-1", Summary: "Meeting"}
+	p := BuildPlaceholder(source, "cal@x.com", PlaceholderOptions{ColorID: "5"})
+	if p.ColorID != "5" {
+		t.Errorf("ColorID = %q, want %q", p.ColorID, "5")
+	}
+}
+
+func TestBuildPlaceholderNoOptions(t *testing.T) {
+	source := GCalEvent{ID: "src-1", Summary: "Meeting"}
+	p := BuildPlaceholder(source, "cal@x.com", PlaceholderOptions{})
+	if p.Summary != "Meeting" {
+		t.Errorf("Summary = %q, want %q", p.Summary, "Meeting")
+	}
+	if p.ColorID != "" {
+		t.Errorf("ColorID should be empty, got %q", p.ColorID)
+	}
+}
+
 func TestBuildPlaceholderNoAttendees(t *testing.T) {
 	source := GCalEvent{
 		ID:          "src-456",
@@ -179,7 +206,7 @@ func TestBuildPlaceholderNoAttendees(t *testing.T) {
 		Description: "Deep work",
 	}
 
-	p := BuildPlaceholder(source, "cal@x.com")
+	p := BuildPlaceholder(source, "cal@x.com", PlaceholderOptions{})
 
 	if p.Description != "Deep work" {
 		t.Errorf("Description = %q, want %q", p.Description, "Deep work")

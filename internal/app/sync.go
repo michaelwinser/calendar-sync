@@ -185,7 +185,8 @@ func syncSourceToHub(ctx context.Context, token string, store *Store, config *Sy
 			continue
 		}
 
-		placeholder := BuildPlaceholder(event, source.CalendarID)
+		// Inbound to hub: no per-calendar visual options
+		placeholder := BuildPlaceholder(event, source.CalendarID, PlaceholderOptions{})
 		existingSynced, hasSynced := syncedBySourceID[event.ID]
 
 		if !hasSynced {
@@ -257,18 +258,20 @@ func syncSourceToHub(ctx context.Context, token string, store *Store, config *Sy
 		delete(syncedBySourceID, event.ID)
 	}
 
-	// 6. Delete orphaned placeholders (source event no longer exists)
-	for _, se := range syncedBySourceID {
-		err := DeleteEvent(ctx, token, hubCalID, se.TargetEventID)
-		if err != nil {
-			log.Printf("failed to delete orphaned placeholder %s: %v", se.TargetEventID, err)
-			result.Errors++
-			continue
+	// 6. Batch delete orphaned placeholders (source event no longer exists)
+	if len(syncedBySourceID) > 0 {
+		var deleteIDs []string
+		var deleteRecords []SyncedEvent
+		for _, se := range syncedBySourceID {
+			deleteIDs = append(deleteIDs, se.TargetEventID)
+			deleteRecords = append(deleteRecords, se)
 		}
-		if err := store.DeleteSyncedEvent(se.ID); err != nil {
-			log.Printf("failed to delete synced event record: %v", err)
+		deleted, errs := BatchDeleteEvents(ctx, token, hubCalID, deleteIDs)
+		result.Deleted += deleted
+		result.Errors += errs
+		for _, se := range deleteRecords {
+			store.DeleteSyncedEvent(se.ID)
 		}
-		result.Deleted++
 	}
 
 	// 7. Persist sync token
@@ -374,7 +377,12 @@ func syncOutboundToSource(ctx context.Context, token string, store *Store, confi
 		}
 
 		key := he.sourceCalID + "|" + he.sourceEventID
-		placeholder := BuildPlaceholder(he.event, he.sourceCalID)
+		// Outbound to source calendar: apply target calendar's visual options
+		opts := PlaceholderOptions{
+			EmojiPrefix: source.EmojiPrefix,
+			ColorID:     source.ColorID,
+		}
+		placeholder := BuildPlaceholder(he.event, he.sourceCalID, opts)
 
 		existingSe, hasSynced := syncedByKey[key]
 
@@ -450,26 +458,25 @@ func syncOutboundToSource(ctx context.Context, token string, store *Store, confi
 		delete(syncedByKey, key)
 	}
 
-	// Delete orphaned outbound placeholders
+	// Batch delete orphaned outbound placeholders
+	var outboundDeleteIDs []string
+	var outboundDeleteRecords []SyncedEvent
 	for _, se := range syncedByKey {
-		// Only delete outbound records (not inbound hub records)
 		if se.TargetCalendarID != targetCalID {
 			continue
 		}
-		err := DeleteEvent(ctx, token, targetCalID, se.TargetEventID)
-		if err != nil {
-			if isPermissionError(err) {
-				return nil
-			}
-			log.Printf("failed to delete orphaned outbound placeholder: %v", err)
-			result.Errors++
-			continue
-		}
-		if err := store.DeleteSyncedEvent(se.ID); err != nil {
-			log.Printf("failed to delete outbound synced event record: %v", err)
-		}
-		result.Deleted++
+		outboundDeleteIDs = append(outboundDeleteIDs, se.TargetEventID)
+		outboundDeleteRecords = append(outboundDeleteRecords, se)
 	}
+	if len(outboundDeleteIDs) > 0 {
+		deleted, errs := BatchDeleteEvents(ctx, token, targetCalID, outboundDeleteIDs)
+		result.Deleted += deleted
+		result.Errors += errs
+		for _, se := range outboundDeleteRecords {
+			store.DeleteSyncedEvent(se.ID)
+		}
+	}
+
 
 	return nil
 }
@@ -500,26 +507,26 @@ func cleanupRemovedSources(ctx context.Context, token string, store *Store, conf
 		return
 	}
 
-	// Delete placeholders whose source calendar is no longer active
+	// Group deletions by target calendar for batching
+	byTarget := make(map[string][]SyncedEvent)
 	for _, se := range allSynced {
 		if activeIDs[se.SourceCalendarID] {
-			continue // source is still active
-		}
-
-		// Delete the placeholder event from the target calendar
-		err := DeleteEvent(ctx, token, se.TargetCalendarID, se.TargetEventID)
-		if err != nil && !isNotFoundError(err) {
-			log.Printf("cleanup: failed to delete placeholder %s on %s: %v",
-				se.TargetEventID, se.TargetCalendarID, err)
-			result.Errors++
 			continue
 		}
+		byTarget[se.TargetCalendarID] = append(byTarget[se.TargetCalendarID], se)
+	}
 
-		// Remove the tracking record
-		if err := store.DeleteSyncedEvent(se.ID); err != nil {
-			log.Printf("cleanup: failed to delete synced event record: %v", err)
+	for calID, records := range byTarget {
+		var ids []string
+		for _, se := range records {
+			ids = append(ids, se.TargetEventID)
 		}
-		result.Deleted++
+		deleted, errs := BatchDeleteEvents(ctx, token, calID, ids)
+		result.Deleted += deleted
+		result.Errors += errs
+		for _, se := range records {
+			store.DeleteSyncedEvent(se.ID)
+		}
 	}
 }
 

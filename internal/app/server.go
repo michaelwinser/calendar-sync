@@ -109,6 +109,8 @@ type configResponse struct {
 type sourceCalendarView struct {
 	CalendarID   string `json:"calendarId"`
 	CalendarName string `json:"calendarName"`
+	EmojiPrefix  string `json:"emojiPrefix"`
+	ColorID      string `json:"colorId"`
 }
 
 // GetConfig returns the user's sync configuration.
@@ -146,6 +148,8 @@ func (s *Server) GetConfig(w http.ResponseWriter, r *http.Request) {
 		resp.Sources = append(resp.Sources, sourceCalendarView{
 			CalendarID:   src.CalendarID,
 			CalendarName: src.CalendarName,
+			EmojiPrefix:  src.EmojiPrefix,
+			ColorID:      src.ColorID,
 		})
 	}
 
@@ -225,6 +229,8 @@ func (s *Server) PutConfig(w http.ResponseWriter, r *http.Request) {
 		resp.Sources = append(resp.Sources, sourceCalendarView{
 			CalendarID:   src.CalendarID,
 			CalendarName: src.CalendarName,
+			EmojiPrefix:  src.EmojiPrefix,
+			ColorID:      src.ColorID,
 		})
 	}
 
