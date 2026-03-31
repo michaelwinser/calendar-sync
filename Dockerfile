@@ -5,10 +5,10 @@ WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=1 go build -o calendar-sync .
+RUN CGO_ENABLED=0 go build -o calendar-sync .
 
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates tzdata sqlite-libs
+RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 COPY --from=builder /build/calendar-sync .
 COPY app.yaml .
