@@ -273,15 +273,19 @@ func (s *Server) TriggerSync(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Override sync window if days parameter is provided
+	// Parse options from query params
 	syncDays := cfg.SyncWindowWeeks * 7
 	if daysStr := r.URL.Query().Get("days"); daysStr != "" {
 		if days, err := strconv.Atoi(daysStr); err == nil && days > 0 {
 			syncDays = days
 		}
 	}
+	dryRun := r.URL.Query().Get("dryRun") == "true"
 
-	result, err := RunSyncWithDays(r.Context(), token, s.Store, cfg, sources, syncDays)
+	result, err := RunSyncWithOptions(r.Context(), token, s.Store, cfg, sources, SyncOptions{
+		SyncDays: syncDays,
+		DryRun:   dryRun,
+	})
 	if err != nil {
 		server.RespondError(w, http.StatusInternalServerError, err.Error())
 		return

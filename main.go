@@ -98,7 +98,13 @@ func main() {
 			}
 			defer cleanup()
 
-			resp, err := httpClient.Post(baseURL+"/api/sync", "application/json", nil)
+			syncURL := baseURL + "/api/sync"
+			dryRun, _ := cmd.Flags().GetBool("dry-run")
+			if dryRun {
+				syncURL += "?dryRun=true"
+			}
+
+			resp, err := httpClient.Post(syncURL, "application/json", nil)
 			if err != nil {
 				return err
 			}
@@ -112,6 +118,7 @@ func main() {
 			return nil
 		},
 	}
+	syncCmd.Flags().Bool("dry-run", false, "Report what would change without making API writes")
 	cliApp.AddCommand(syncCmd)
 
 	cliApp.Execute()

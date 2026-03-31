@@ -25,13 +25,28 @@ type SyncResult struct {
 	Message string `json:"message"`
 }
 
+// SyncOptions controls sync behavior.
+type SyncOptions struct {
+	SyncDays int  // 0 = use config default
+	DryRun   bool // if true, report what would change without writing
+}
+
 // RunSync executes a full sync pass using the configured sync window.
 func RunSync(ctx context.Context, token string, store *Store, config *SyncConfig, sources []SourceCalendar) (*SyncResult, error) {
-	return RunSyncWithDays(ctx, token, store, config, sources, config.SyncWindowWeeks*7)
+	return RunSyncWithOptions(ctx, token, store, config, sources, SyncOptions{})
 }
 
 // RunSyncWithDays executes a full sync pass with an explicit window in days.
 func RunSyncWithDays(ctx context.Context, token string, store *Store, config *SyncConfig, sources []SourceCalendar, syncDays int) (*SyncResult, error) {
+	return RunSyncWithOptions(ctx, token, store, config, sources, SyncOptions{SyncDays: syncDays})
+}
+
+// RunSyncWithOptions executes a full sync pass with explicit options.
+func RunSyncWithOptions(ctx context.Context, token string, store *Store, config *SyncConfig, sources []SourceCalendar, opts SyncOptions) (*SyncResult, error) {
+	syncDays := opts.SyncDays
+	if syncDays <= 0 {
+		syncDays = config.SyncWindowWeeks * 7
+	}
 	if syncDays <= 0 {
 		syncDays = 56 // default 8 weeks
 	}
@@ -44,21 +59,25 @@ func RunSyncWithDays(ctx context.Context, token string, store *Store, config *Sy
 		return nil, fmt.Errorf("a sync is already running (started %s)", running.StartedAt)
 	}
 
-	// Create sync log
+	dryRun := opts.DryRun
+
+	// Create sync log (skip in dry-run)
 	syncLog := &SyncLog{
 		UserID:    config.UserID,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 		Status:    "running",
 	}
-	if err := store.CreateSyncLog(syncLog); err != nil {
-		return nil, fmt.Errorf("creating sync log: %w", err)
+	if !dryRun {
+		if err := store.CreateSyncLog(syncLog); err != nil {
+			return nil, fmt.Errorf("creating sync log: %w", err)
+		}
 	}
 
 	result := &SyncResult{}
 
 	// Phase 1: Inbound — sync each source calendar to the hub
 	for _, source := range sources {
-		err := syncSourceToHub(ctx, token, store, config, &source, syncDays, result)
+		err := syncSourceToHub(ctx, token, store, config, &source, syncDays, dryRun, result)
 		if err != nil {
 			log.Printf("inbound sync error for %s: %v", source.CalendarName, err)
 			result.Errors++
@@ -69,34 +88,42 @@ func RunSyncWithDays(ctx context.Context, token string, store *Store, config *Sy
 	// Note: newly created/deleted hub events from Phase 1 may not be visible
 	// to the API yet due to eventual consistency. They will propagate on the
 	// next sync pass. This is an accepted trade-off.
-	if err := syncHubToSources(ctx, token, store, config, sources, result); err != nil {
+	if err := syncHubToSources(ctx, token, store, config, sources, dryRun, result); err != nil {
 		log.Printf("outbound sync error: %v", err)
 		result.Errors++
 	}
 
 	// Phase 3: Cleanup — delete placeholders for removed source calendars
-	cleanupRemovedSources(ctx, token, store, config, sources, result)
+	if !dryRun {
+		cleanupRemovedSources(ctx, token, store, config, sources, result)
+	}
 
 	// Phase 4: Cleanup — delete placeholders for past events (end date before today)
-	cleanupPastEvents(ctx, token, store, config, sources, result)
+	if !dryRun {
+		cleanupPastEvents(ctx, token, store, config, sources, result)
+	}
 
 	// Complete sync log
-	syncLog.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-	syncLog.Created = result.Created
-	syncLog.Updated = result.Updated
-	syncLog.Deleted = result.Deleted
-	syncLog.Errors = result.Errors
-	syncLog.Status = "completed"
-	if result.Errors > 0 {
-		syncLog.Status = "completed_with_errors"
+	if !dryRun {
+		syncLog.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+		syncLog.Created = result.Created
+		syncLog.Updated = result.Updated
+		syncLog.Deleted = result.Deleted
+		syncLog.Errors = result.Errors
+		syncLog.Status = "completed"
+		if result.Errors > 0 {
+			syncLog.Status = "completed_with_errors"
+		}
+		store.UpdateSyncLog(syncLog)
+		store.UpdateLastSyncAt(config.UserID)
 	}
-	store.UpdateSyncLog(syncLog)
 
-	// Record last sync time for nudge scheduling
-	store.UpdateLastSyncAt(config.UserID)
-
-	result.Message = fmt.Sprintf("Sync completed: %d created, %d updated, %d deleted",
-		result.Created, result.Updated, result.Deleted)
+	prefix := "Sync completed"
+	if dryRun {
+		prefix = "Dry run"
+	}
+	result.Message = fmt.Sprintf("%s: %d created, %d updated, %d deleted",
+		prefix, result.Created, result.Updated, result.Deleted)
 	if result.Errors > 0 {
 		result.Message += fmt.Sprintf(", %d errors", result.Errors)
 	}
@@ -104,7 +131,7 @@ func RunSyncWithDays(ctx context.Context, token string, store *Store, config *Sy
 	return result, nil
 }
 
-func syncSourceToHub(ctx context.Context, token string, store *Store, config *SyncConfig, source *SourceCalendar, syncDays int, result *SyncResult) error {
+func syncSourceToHub(ctx context.Context, token string, store *Store, config *SyncConfig, source *SourceCalendar, syncDays int, dryRun bool, result *SyncResult) error {
 	hubCalID := config.HubCalendarID
 
 	now := time.Now().UTC()
@@ -191,26 +218,30 @@ func syncSourceToHub(ctx context.Context, token string, store *Store, config *Sy
 
 		if !hasSynced {
 			// Check if a placeholder already exists on the hub (e.g. after DB wipe).
-			// Adopt it instead of creating a duplicate.
-			if existingPlaceholder, found := placeholderBySourceID[event.ID]; found {
-				err := store.CreateSyncedEvent(&SyncedEvent{
-					UserID:           config.UserID,
-					SourceCalendarID: source.CalendarID,
-					SourceEventID:    event.ID,
-					TargetCalendarID: hubCalID,
-					TargetEventID:    existingPlaceholder.ID,
-					SourceUpdated:    event.Updated,
-				})
-				if err != nil {
-					log.Printf("failed to adopt existing placeholder: %v", err)
-					result.Errors++
+			if _, found := placeholderBySourceID[event.ID]; found {
+				if !dryRun {
+					err := store.CreateSyncedEvent(&SyncedEvent{
+						UserID:           config.UserID,
+						SourceCalendarID: source.CalendarID,
+						SourceEventID:    event.ID,
+						TargetCalendarID: hubCalID,
+						TargetEventID:    placeholderBySourceID[event.ID].ID,
+						SourceUpdated:    event.Updated,
+					})
+					if err != nil {
+						log.Printf("failed to adopt existing placeholder: %v", err)
+						result.Errors++
+					}
 				}
-				// Remove from map so it isn't orphan-deleted
 				delete(syncedBySourceID, event.ID)
 				continue
 			}
 
-			// CREATE: no existing placeholder anywhere
+			// CREATE
+			if dryRun {
+				result.Created++
+				continue
+			}
 			created, err := CreateEvent(ctx, token, hubCalID, &placeholder)
 			if err != nil {
 				log.Printf("failed to create placeholder for %s: %v", event.Summary, err)
@@ -232,12 +263,14 @@ func syncSourceToHub(ctx context.Context, token string, store *Store, config *Sy
 			}
 			result.Created++
 		} else if event.Updated > existingSynced.SourceUpdated {
-			// UPDATE: source changed since last sync
+			// UPDATE
+			if dryRun {
+				result.Updated++
+				continue
+			}
 			_, err := UpdateEvent(ctx, token, hubCalID, existingSynced.TargetEventID, &placeholder)
 			if err != nil {
 				if isNotFoundError(err) {
-					// Placeholder was deleted by user — remove stale record so
-					// the next sync pass recreates it (option 2: sync owns placeholders)
 					log.Printf("placeholder for %s was deleted, will recreate next pass", event.Summary)
 					store.DeleteSyncedEvent(existingSynced.ID)
 				} else {
@@ -260,17 +293,21 @@ func syncSourceToHub(ctx context.Context, token string, store *Store, config *Sy
 
 	// 6. Batch delete orphaned placeholders (source event no longer exists)
 	if len(syncedBySourceID) > 0 {
-		var deleteIDs []string
-		var deleteRecords []SyncedEvent
-		for _, se := range syncedBySourceID {
-			deleteIDs = append(deleteIDs, se.TargetEventID)
-			deleteRecords = append(deleteRecords, se)
-		}
-		deleted, errs := BatchDeleteEvents(ctx, token, hubCalID, deleteIDs)
-		result.Deleted += deleted
-		result.Errors += errs
-		for _, se := range deleteRecords {
-			store.DeleteSyncedEvent(se.ID)
+		if dryRun {
+			result.Deleted += len(syncedBySourceID)
+		} else {
+			var deleteIDs []string
+			var deleteRecords []SyncedEvent
+			for _, se := range syncedBySourceID {
+				deleteIDs = append(deleteIDs, se.TargetEventID)
+				deleteRecords = append(deleteRecords, se)
+			}
+			deleted, errs := BatchDeleteEvents(ctx, token, hubCalID, deleteIDs)
+			result.Deleted += deleted
+			result.Errors += errs
+			for _, se := range deleteRecords {
+				store.DeleteSyncedEvent(se.ID)
+			}
 		}
 	}
 
@@ -287,7 +324,7 @@ func syncSourceToHub(ctx context.Context, token string, store *Store, config *Sy
 // syncHubToSources syncs hub placeholders outbound to each source calendar.
 // For each source calendar S, it creates/updates/deletes placeholders for
 // hub events that did NOT originate from S (no self-sync).
-func syncHubToSources(ctx context.Context, token string, store *Store, config *SyncConfig, sources []SourceCalendar, result *SyncResult) error {
+func syncHubToSources(ctx context.Context, token string, store *Store, config *SyncConfig, sources []SourceCalendar, dryRun bool, result *SyncResult) error {
 	hubCalID := config.HubCalendarID
 
 	// Fetch ALL hub placeholders as ground truth for what should exist outbound.
@@ -316,7 +353,7 @@ func syncHubToSources(ctx context.Context, token string, store *Store, config *S
 
 	// For each source calendar, propagate hub events that didn't originate from it
 	for _, source := range sources {
-		if err := syncOutboundToSource(ctx, token, store, config, &source, hubEvents, result); err != nil {
+		if err := syncOutboundToSource(ctx, token, store, config, &source, hubEvents, dryRun, result); err != nil {
 			log.Printf("outbound sync error for %s: %v", source.CalendarName, err)
 			result.Errors++
 		}
@@ -325,7 +362,7 @@ func syncHubToSources(ctx context.Context, token string, store *Store, config *S
 	return nil
 }
 
-func syncOutboundToSource(ctx context.Context, token string, store *Store, config *SyncConfig, source *SourceCalendar, hubEvents []hubEvent, result *SyncResult) error {
+func syncOutboundToSource(ctx context.Context, token string, store *Store, config *SyncConfig, source *SourceCalendar, hubEvents []hubEvent, dryRun bool, result *SyncResult) error {
 	targetCalID := source.CalendarID
 
 	// Load existing outbound SyncedEvent records for this target calendar
@@ -406,6 +443,10 @@ func syncOutboundToSource(ctx context.Context, token string, store *Store, confi
 			}
 
 			// CREATE outbound placeholder
+			if dryRun {
+				result.Created++
+				continue
+			}
 			created, err := CreateEvent(ctx, token, targetCalID, &placeholder)
 			if err != nil {
 				// Silently skip read-only calendars (UC-0047)
@@ -433,6 +474,11 @@ func syncOutboundToSource(ctx context.Context, token string, store *Store, confi
 			result.Created++
 		} else if he.event.Updated > existingSe.SourceUpdated {
 			// UPDATE outbound placeholder
+			if dryRun {
+				result.Updated++
+				delete(syncedByKey, key)
+				continue
+			}
 			_, err := UpdateEvent(ctx, token, targetCalID, existingSe.TargetEventID, &placeholder)
 			if err != nil {
 				if isPermissionError(err) {
@@ -469,14 +515,17 @@ func syncOutboundToSource(ctx context.Context, token string, store *Store, confi
 		outboundDeleteRecords = append(outboundDeleteRecords, se)
 	}
 	if len(outboundDeleteIDs) > 0 {
-		deleted, errs := BatchDeleteEvents(ctx, token, targetCalID, outboundDeleteIDs)
-		result.Deleted += deleted
-		result.Errors += errs
-		for _, se := range outboundDeleteRecords {
-			store.DeleteSyncedEvent(se.ID)
+		if dryRun {
+			result.Deleted += len(outboundDeleteIDs)
+		} else {
+			deleted, errs := BatchDeleteEvents(ctx, token, targetCalID, outboundDeleteIDs)
+			result.Deleted += deleted
+			result.Errors += errs
+			for _, se := range outboundDeleteRecords {
+				store.DeleteSyncedEvent(se.ID)
+			}
 		}
 	}
-
 
 	return nil
 }
