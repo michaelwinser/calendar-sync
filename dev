@@ -20,6 +20,93 @@ dev_ci() {
     dev_e2e
 }
 
+dev_setup_scheduler() {
+    # Sandbox gate
+    if [ -n "$NONO_CAP_FILE" ]; then
+        echo "Error: cannot run inside a nono sandbox."
+        echo "Run ./dev setup-scheduler directly, outside the sandbox."
+        return 1
+    fi
+
+    PROJECT="xwind-calendar-sync"
+    REGION="us-west1"
+    APP_NAME="calendar-sync"
+    SERVICE_URL=$(gcloud run services describe "$APP_NAME" \
+        --project="$PROJECT" --region="$REGION" \
+        --format="value(status.url)" 2>/dev/null)
+
+    if [ -z "$SERVICE_URL" ]; then
+        echo "Error: Cloud Run service not found. Deploy first with ./dev deploy"
+        return 1
+    fi
+
+    NUDGE_KEY="${SYNC_NUDGE_KEY}"
+    if [ -z "$NUDGE_KEY" ]; then
+        # Try loading from env file
+        _load_secrets
+        NUDGE_KEY="${SYNC_NUDGE_KEY}"
+    fi
+    if [ -z "$NUDGE_KEY" ]; then
+        echo "Error: SYNC_NUDGE_KEY not set."
+        echo "Set it with: appconfig set SYNC_NUDGE_KEY=\$(openssl rand -hex 32)"
+        echo "Then deploy again to update the Cloud Run env vars."
+        return 1
+    fi
+
+    SA_NAME="scheduler-invoker"
+    SA_EMAIL="${SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
+
+    echo "=== Setting up Cloud Scheduler ==="
+    echo "  Project:     $PROJECT"
+    echo "  Service URL: $SERVICE_URL"
+    echo ""
+
+    # 1. Enable Cloud Scheduler API
+    echo "[1/4] Enabling Cloud Scheduler API..."
+    gcloud services enable cloudscheduler.googleapis.com --project="$PROJECT" 2>/dev/null
+
+    # 2. Create service account (if not exists)
+    echo "[2/4] Creating service account..."
+    gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT" >/dev/null 2>&1 || \
+        gcloud iam service-accounts create "$SA_NAME" \
+            --project="$PROJECT" \
+            --display-name="Cloud Scheduler invoker for $APP_NAME"
+
+    # 3. Grant Cloud Run invoker role
+    echo "[3/4] Granting Cloud Run invoker role..."
+    gcloud run services add-iam-policy-binding "$APP_NAME" \
+        --project="$PROJECT" --region="$REGION" \
+        --member="serviceAccount:$SA_EMAIL" \
+        --role="roles/run.invoker" >/dev/null 2>&1
+
+    # 4. Create scheduler job
+    echo "[4/4] Creating scheduler job..."
+    JOB_NAME="${APP_NAME}-nudge"
+
+    # Delete existing job if present (to update config)
+    gcloud scheduler jobs delete "$JOB_NAME" \
+        --project="$PROJECT" --location="$REGION" \
+        --quiet 2>/dev/null || true
+
+    gcloud scheduler jobs create http "$JOB_NAME" \
+        --project="$PROJECT" \
+        --location="$REGION" \
+        --schedule="*/5 * * * *" \
+        --uri="${SERVICE_URL}/sync/nudge" \
+        --http-method=POST \
+        --headers="X-Nudge-Key=${NUDGE_KEY}" \
+        --oidc-service-account-email="$SA_EMAIL" \
+        --oidc-token-audience="$SERVICE_URL" \
+        --description="Nudge calendar-sync every 5 minutes"
+
+    echo ""
+    echo "=== Cloud Scheduler setup complete ==="
+    echo "  Job: $JOB_NAME (every 5 minutes)"
+    echo "  Target: ${SERVICE_URL}/sync/nudge"
+    echo ""
+    echo "  Test manually: gcloud scheduler jobs run $JOB_NAME --project=$PROJECT --location=$REGION"
+}
+
 dev_deploy() {
     # Sandbox gate: deploy needs cloud credentials that the sandbox correctly blocks
     if [ -n "$NONO_CAP_FILE" ]; then
@@ -40,10 +127,22 @@ dev_deploy() {
 
     echo "CI passed. Deploying..."
     _load_secrets && appbase deploy
+
+    # Push SYNC_NUDGE_KEY to Cloud Run if set
+    if [ -n "$SYNC_NUDGE_KEY" ]; then
+        echo ""
+        echo "Setting SYNC_NUDGE_KEY on Cloud Run..."
+        gcloud run services update calendar-sync \
+            --project=xwind-calendar-sync \
+            --region=us-west1 \
+            --update-env-vars="SYNC_NUDGE_KEY=$SYNC_NUDGE_KEY" \
+            --quiet 2>/dev/null && echo "  Done." || echo "  Warning: failed to set SYNC_NUDGE_KEY"
+    fi
 }
 
 # Dispatch — add app-specific commands before the fallthrough
 case "${1:-help}" in
-    deploy)  dev_deploy ;;
-    *)       dev_dispatch "$@" ;;
+    deploy)           dev_deploy ;;
+    setup-scheduler)  dev_setup_scheduler ;;
+    *)                dev_dispatch "$@" ;;
 esac
