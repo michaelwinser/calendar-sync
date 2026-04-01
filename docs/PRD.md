@@ -29,7 +29,7 @@ Calendar Sync keeps a user's free/busy status consistent across multiple Google 
 |----|----------|-------------|
 | UC-0010 | List available calendars | An authenticated user can retrieve a list of their Google Calendars (id, name, primary flag). |
 | UC-0011 | Designate hub calendar | The user selects an existing Google Calendar to serve as the hub. The selection is persisted. Only one hub calendar can be active at a time. |
-| UC-0012 | Change hub calendar | The user can change which calendar is the hub. Changing the hub does not delete previously synced placeholder events (cleanup is a separate concern). |
+| UC-0012 | Change hub calendar | The user can change which calendar is the hub. Cleanup of the old hub is handled by UC-0060. |
 | UC-0013 | Add source calendar | The user selects a Google Calendar to sync to the hub. The calendar is added to the sync configuration. The hub calendar cannot also be a source calendar. |
 | UC-0014 | Remove source calendar | The user removes a calendar from the sync configuration. Previously synced placeholder events from that calendar remain on the hub until the next sync pass cleans them up. |
 | UC-0015 | View sync configuration | The user can view their current configuration: which calendar is the hub and which calendars are selected as sources. |
@@ -84,6 +84,7 @@ Calendar Sync keeps a user's free/busy status consistent across multiple Google 
 | UC-0057 | Sync window control in UI | The sync window (in weeks) and sync interval (in minutes) are configurable via the UI. |
 | UC-0058 | Dry-run sync | The CLI `sync` command supports a `--dry-run` flag that reports what would change without making API writes. |
 | UC-0059 | Per-calendar sync log | Sync logs include per-calendar breakdowns of created/updated/deleted counts, shown in the UI. |
+| UC-0060 | Hub change cleans up old hub | When the hub calendar is changed, the next sync pass deletes all placeholder events from the old hub and removes outbound placeholders on source calendars that were synced from the old hub. Corresponding SyncedEvent records are cleaned up. |
 
 ## Future Considerations
 
@@ -118,4 +119,4 @@ Track implementation status here. E2e tests for all "done" use cases must pass i
 | M2 | UC-0010 – UC-0016 | done (UC-0010 manual only) |
 | M3 | UC-0020 – UC-0034 | done (UC-0020–UC-0028, UC-0031–UC-0034 manual only) |
 | M4 | UC-0040 – UC-0049 | done (UC-0040–UC-0049 manual only) |
-| M5 | UC-0050 – UC-0059 | not started |
+| M5 | UC-0050 – UC-0060 | not started |

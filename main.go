@@ -544,11 +544,15 @@ const homePage = `<!DOCTYPE html>
         status.textContent = 'Syncing...';
         try {
             const res = await fetch('/api/sync', { method: 'POST' });
-            const data = await res.json();
+            const text = await res.text();
+            let data;
+            try { data = JSON.parse(text); } catch { data = null; }
             if (!res.ok) {
-                status.textContent = 'Error: ' + (data.error || 'sync failed');
-            } else {
+                status.textContent = 'Error: ' + (data?.error || text || 'sync failed');
+            } else if (data) {
                 status.textContent = data.message;
+            } else {
+                status.textContent = text;
             }
             loadSyncLogs();
         } catch (e) {

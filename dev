@@ -29,11 +29,11 @@ dev_setup_scheduler() {
     fi
 
     PROJECT="xwind-calendar-sync"
-    REGION="us-west1"
+    REGION="us-central1"
     APP_NAME="calendar-sync"
     SERVICE_URL=$(gcloud run services describe "$APP_NAME" \
         --project="$PROJECT" --region="$REGION" \
-        --format="value(status.url)" 2>/dev/null)
+        --format="value(status.url)" 2>/dev/null || true)
 
     if [ -z "$SERVICE_URL" ]; then
         echo "Error: Cloud Run service not found. Deploy first with ./dev deploy"
@@ -42,9 +42,7 @@ dev_setup_scheduler() {
 
     NUDGE_KEY="${SYNC_NUDGE_KEY}"
     if [ -z "$NUDGE_KEY" ]; then
-        # Try loading from env file
-        _load_secrets
-        NUDGE_KEY="${SYNC_NUDGE_KEY}"
+        NUDGE_KEY=$(appconfig get SYNC_NUDGE_KEY 2>/dev/null || true)
     fi
     if [ -z "$NUDGE_KEY" ]; then
         echo "Error: SYNC_NUDGE_KEY not set."
@@ -134,7 +132,7 @@ dev_deploy() {
         echo "Setting SYNC_NUDGE_KEY on Cloud Run..."
         gcloud run services update calendar-sync \
             --project=xwind-calendar-sync \
-            --region=us-west1 \
+            --region=us-central1 \
             --update-env-vars="SYNC_NUDGE_KEY=$SYNC_NUDGE_KEY" \
             --quiet 2>/dev/null && echo "  Done." || echo "  Warning: failed to set SYNC_NUDGE_KEY"
     fi

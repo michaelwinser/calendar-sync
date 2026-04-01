@@ -1,6 +1,10 @@
 name: calendar-sync
 port: 4004
 
+gcp:
+  apis:
+    - cloudscheduler.googleapis.com
+
 store:
   type: sqlite
   path: data/app.db
