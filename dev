@@ -31,13 +31,19 @@ dev_setup_scheduler() {
     PROJECT="xwind-calendar-sync"
     REGION="us-central1"
     APP_NAME="calendar-sync"
-    SERVICE_URL=$(gcloud run services describe "$APP_NAME" \
-        --project="$PROJECT" --region="$REGION" \
-        --format="value(status.url)" 2>/dev/null || true)
+    STABLE_DOMAIN="calendar-sync.winser.net"
 
-    if [ -z "$SERVICE_URL" ]; then
-        echo "Error: Cloud Run service not found. Deploy first with ./dev deploy"
-        return 1
+    # Prefer stable domain; fall back to Cloud Run service URL
+    if [ -n "$STABLE_DOMAIN" ]; then
+        SERVICE_URL="https://${STABLE_DOMAIN}"
+    else
+        SERVICE_URL=$(gcloud run services describe "$APP_NAME" \
+            --project="$PROJECT" --region="$REGION" \
+            --format="value(status.url)" 2>/dev/null || true)
+        if [ -z "$SERVICE_URL" ]; then
+            echo "Error: Cloud Run service not found. Deploy first with ./dev deploy"
+            return 1
+        fi
     fi
 
     NUDGE_KEY="${SYNC_NUDGE_KEY}"
@@ -60,25 +66,32 @@ dev_setup_scheduler() {
     echo ""
 
     # 1. Enable Cloud Scheduler API
-    echo "[1/4] Enabling Cloud Scheduler API..."
+    echo "[1/5] Enabling Cloud Scheduler API..."
     gcloud services enable cloudscheduler.googleapis.com --project="$PROJECT" 2>/dev/null
 
-    # 2. Create service account (if not exists)
-    echo "[2/4] Creating service account..."
+    # 2. Push SYNC_NUDGE_KEY to Cloud Run
+    echo "[2/5] Setting SYNC_NUDGE_KEY on Cloud Run..."
+    gcloud run services update "$APP_NAME" \
+        --project="$PROJECT" --region="$REGION" \
+        --update-env-vars="SYNC_NUDGE_KEY=$NUDGE_KEY" \
+        --quiet 2>/dev/null && echo "  Done." || echo "  Warning: failed to set SYNC_NUDGE_KEY"
+
+    # 3. Create service account (if not exists)
+    echo "[3/5] Creating service account..."
     gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT" >/dev/null 2>&1 || \
         gcloud iam service-accounts create "$SA_NAME" \
             --project="$PROJECT" \
             --display-name="Cloud Scheduler invoker for $APP_NAME"
 
-    # 3. Grant Cloud Run invoker role
-    echo "[3/4] Granting Cloud Run invoker role..."
+    # 4. Grant Cloud Run invoker role
+    echo "[4/5] Granting Cloud Run invoker role..."
     gcloud run services add-iam-policy-binding "$APP_NAME" \
         --project="$PROJECT" --region="$REGION" \
         --member="serviceAccount:$SA_EMAIL" \
         --role="roles/run.invoker" >/dev/null 2>&1
 
-    # 4. Create scheduler job
-    echo "[4/4] Creating scheduler job..."
+    # 5. Create scheduler job
+    echo "[5/5] Creating scheduler job..."
     JOB_NAME="${APP_NAME}-nudge"
 
     # Delete existing job if present (to update config)
@@ -125,17 +138,6 @@ dev_deploy() {
 
     echo "CI passed. Deploying..."
     _load_secrets && appbase deploy
-
-    # Push SYNC_NUDGE_KEY to Cloud Run if set
-    if [ -n "$SYNC_NUDGE_KEY" ]; then
-        echo ""
-        echo "Setting SYNC_NUDGE_KEY on Cloud Run..."
-        gcloud run services update calendar-sync \
-            --project=xwind-calendar-sync \
-            --region=us-central1 \
-            --update-env-vars="SYNC_NUDGE_KEY=$SYNC_NUDGE_KEY" \
-            --quiet 2>/dev/null && echo "  Done." || echo "  Warning: failed to set SYNC_NUDGE_KEY"
-    fi
 }
 
 # Dispatch — add app-specific commands before the fallthrough
