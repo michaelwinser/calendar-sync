@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strconv"
+	"sync"
 	"strings"
 	"time"
 
@@ -20,6 +20,9 @@ import (
 type Server struct {
 	Store  *Store
 	Google *auth.GoogleAuth
+
+	nudgeMu   sync.Mutex
+	lastNudge time.Time
 }
 
 // getAccessToken returns the OAuth access token, refreshing if expired.
@@ -496,20 +499,23 @@ func (s *Server) BulkDeleteEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 // NudgeSync triggers sync for all users who are due based on their schedule.
-// Auth: X-Nudge-Key header required (matches SYNC_NUDGE_KEY env var).
-// On Cloud Run, add OIDC at the infrastructure level as a second layer.
+// Unauthenticated — safe because it only triggers syncs that are already due
+// (per-user interval check) using stored refresh tokens. No user data is exposed.
+// Rate-limited to one call per minute to prevent abuse.
 // Registered at /sync/nudge (not /api/) to bypass session auth middleware.
 func (s *Server) NudgeSync(w http.ResponseWriter, r *http.Request) {
-	// Auth: always require deployment key
-	nudgeKey := os.Getenv("SYNC_NUDGE_KEY")
-	if nudgeKey == "" {
-		server.RespondError(w, http.StatusServiceUnavailable, "SYNC_NUDGE_KEY not configured")
+	// Rate limit: reject if called less than 60 seconds ago
+	now := time.Now().UTC()
+	s.nudgeMu.Lock()
+	if !s.lastNudge.IsZero() && now.Before(s.lastNudge.Add(60*time.Second)) {
+		s.nudgeMu.Unlock()
+		server.RespondJSON(w, http.StatusTooManyRequests, map[string]string{
+			"error": "nudge rate limited — try again later",
+		})
 		return
 	}
-	if r.Header.Get("X-Nudge-Key") != nudgeKey {
-		server.RespondError(w, http.StatusUnauthorized, "invalid nudge key")
-		return
-	}
+	s.lastNudge = now
+	s.nudgeMu.Unlock()
 
 	configs, err := s.Store.GetAllConfigs()
 	if err != nil {
@@ -517,7 +523,6 @@ func (s *Server) NudgeSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := time.Now().UTC()
 	synced, skipped, errors := 0, 0, 0
 
 	for _, cfg := range configs {

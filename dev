@@ -46,52 +46,17 @@ dev_setup_scheduler() {
         fi
     fi
 
-    NUDGE_KEY="${SYNC_NUDGE_KEY}"
-    if [ -z "$NUDGE_KEY" ]; then
-        NUDGE_KEY=$(appconfig get SYNC_NUDGE_KEY 2>/dev/null || true)
-    fi
-    if [ -z "$NUDGE_KEY" ]; then
-        echo "Error: SYNC_NUDGE_KEY not set."
-        echo "Set it with: appconfig set SYNC_NUDGE_KEY=\$(openssl rand -hex 32)"
-        echo "Then deploy again to update the Cloud Run env vars."
-        return 1
-    fi
-
-    SA_NAME="scheduler-invoker"
-    SA_EMAIL="${SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
-
     echo "=== Setting up Cloud Scheduler ==="
     echo "  Project:     $PROJECT"
     echo "  Service URL: $SERVICE_URL"
     echo ""
 
     # 1. Enable Cloud Scheduler API
-    echo "[1/5] Enabling Cloud Scheduler API..."
+    echo "[1/2] Enabling Cloud Scheduler API..."
     gcloud services enable cloudscheduler.googleapis.com --project="$PROJECT" 2>/dev/null
 
-    # 2. Push SYNC_NUDGE_KEY to Cloud Run
-    echo "[2/5] Setting SYNC_NUDGE_KEY on Cloud Run..."
-    gcloud run services update "$APP_NAME" \
-        --project="$PROJECT" --region="$REGION" \
-        --update-env-vars="SYNC_NUDGE_KEY=$NUDGE_KEY" \
-        --quiet 2>/dev/null && echo "  Done." || echo "  Warning: failed to set SYNC_NUDGE_KEY"
-
-    # 3. Create service account (if not exists)
-    echo "[3/5] Creating service account..."
-    gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT" >/dev/null 2>&1 || \
-        gcloud iam service-accounts create "$SA_NAME" \
-            --project="$PROJECT" \
-            --display-name="Cloud Scheduler invoker for $APP_NAME"
-
-    # 4. Grant Cloud Run invoker role
-    echo "[4/5] Granting Cloud Run invoker role..."
-    gcloud run services add-iam-policy-binding "$APP_NAME" \
-        --project="$PROJECT" --region="$REGION" \
-        --member="serviceAccount:$SA_EMAIL" \
-        --role="roles/run.invoker" >/dev/null 2>&1
-
-    # 5. Create scheduler job
-    echo "[5/5] Creating scheduler job..."
+    # 2. Create scheduler job (unauthenticated — nudge endpoint is rate-limited)
+    echo "[2/2] Creating scheduler job..."
     JOB_NAME="${APP_NAME}-nudge"
 
     # Delete existing job if present (to update config)
@@ -105,9 +70,6 @@ dev_setup_scheduler() {
         --schedule="*/5 * * * *" \
         --uri="${SERVICE_URL}/sync/nudge" \
         --http-method=POST \
-        --headers="X-Nudge-Key=${NUDGE_KEY}" \
-        --oidc-service-account-email="$SA_EMAIL" \
-        --oidc-token-audience="$SERVICE_URL" \
         --description="Nudge calendar-sync every 5 minutes"
 
     echo ""
