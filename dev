@@ -89,14 +89,20 @@ dev_deploy() {
         return 1
     fi
 
-    # Deploy gate: CI must pass before deploying
-    echo "Running CI checks before deploy..."
-    dev_ci || { echo "CI failed. Fix errors before deploying."; return 1; }
-
+    # Pre-flight checks
     if [ -n "$(git status --porcelain)" ]; then
         echo "Working tree is dirty. Commit changes before deploying."
         return 1
     fi
+
+    if ! gcloud auth print-access-token --quiet >/dev/null 2>&1; then
+        echo "gcloud auth expired. Run: gcloud auth login"
+        return 1
+    fi
+
+    # Deploy gate: CI must pass before deploying
+    echo "Running CI checks before deploy..."
+    dev_ci || { echo "CI failed. Fix errors before deploying."; return 1; }
 
     echo "CI passed. Deploying..."
     _load_secrets && appbase deploy
