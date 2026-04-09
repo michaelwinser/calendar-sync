@@ -506,7 +506,8 @@ func (s *Server) NudgeSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	synced, skipped, errors := 0, 0, 0
+	synced, skipped := 0, 0
+	var errs []string
 
 	for _, cfg := range configs {
 		// Check if sync is due
@@ -526,21 +527,25 @@ func (s *Server) NudgeSync(w http.ResponseWriter, r *http.Request) {
 
 		// Check refresh token
 		if cfg.RefreshToken == "" {
-			log.Printf("nudge: user %s has no refresh token", cfg.UserID)
-			errors++
+			msg := fmt.Sprintf("user %s: no refresh token — log in via the web UI", cfg.UserID)
+			log.Printf("nudge: %s", msg)
+			errs = append(errs, msg)
 			continue
 		}
 
 		// Get fresh access token
 		if s.Google == nil {
-			errors++
+			msg := fmt.Sprintf("user %s: Google auth not configured on server", cfg.UserID)
+			log.Printf("nudge: %s", msg)
+			errs = append(errs, msg)
 			continue
 		}
 		session := &auth.Session{RefreshToken: cfg.RefreshToken}
 		token, err := s.Google.RefreshAccessToken(r.Context(), session)
 		if err != nil {
-			log.Printf("nudge: token refresh failed for user %s: %v", cfg.UserID, err)
-			errors++
+			msg := fmt.Sprintf("user %s: token refresh failed: %v", cfg.UserID, err)
+			log.Printf("nudge: %s", msg)
+			errs = append(errs, msg)
 			continue
 		}
 
@@ -550,15 +555,18 @@ func (s *Server) NudgeSync(w http.ResponseWriter, r *http.Request) {
 
 		sources, err := s.Store.GetSources(cfg.UserID)
 		if err != nil {
-			errors++
+			msg := fmt.Sprintf("user %s: failed to load sources: %v", cfg.UserID, err)
+			log.Printf("nudge: %s", msg)
+			errs = append(errs, msg)
 			continue
 		}
 		// Allow zero sources — cleanup phase needs to run
 
 		syncDays := cfg.SyncWindowWeeks * 7
 		if _, err := RunSyncWithDays(r.Context(), token, s.Store, &cfg, sources, syncDays); err != nil {
-			log.Printf("nudge: sync failed for user %s: %v", cfg.UserID, err)
-			errors++
+			msg := fmt.Sprintf("user %s: sync failed: %v", cfg.UserID, err)
+			log.Printf("nudge: %s", msg)
+			errs = append(errs, msg)
 			continue
 		}
 		synced++
@@ -568,6 +576,6 @@ func (s *Server) NudgeSync(w http.ResponseWriter, r *http.Request) {
 		"total":   len(configs),
 		"synced":  synced,
 		"skipped": skipped,
-		"errors":  errors,
+		"errors":  errs,
 	})
 }
