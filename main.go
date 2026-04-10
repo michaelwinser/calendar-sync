@@ -590,6 +590,15 @@ const homePage = `<!DOCTYPE html>
                         }
                     } catch(e) {}
                 }
+                // Error details
+                if (log.errorDetails) {
+                    try {
+                        const errs = typeof log.errorDetails === 'string' ? JSON.parse(log.errorDetails) : log.errorDetails;
+                        for (const e of errs) {
+                            html += '<tr style="border-bottom:1px solid #eee;color:#c00"><td colspan="3" style="padding-left:1rem;font-size:0.8rem">' + esc(e) + '</td></tr>';
+                        }
+                    } catch(e) {}
+                }
             }
             html += '</table>';
             el.innerHTML = html;

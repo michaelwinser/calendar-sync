@@ -26,12 +26,21 @@ type CalendarCounts struct {
 
 // SyncResult holds the counts from a sync pass.
 type SyncResult struct {
-	Created    int                        `json:"created"`
-	Updated    int                        `json:"updated"`
-	Deleted    int                        `json:"deleted"`
-	Errors     int                        `json:"errors"`
-	Message    string                     `json:"message"`
-	PerCalendar map[string]*CalendarCounts `json:"perCalendar,omitempty"`
+	Created      int                        `json:"created"`
+	Updated      int                        `json:"updated"`
+	Deleted      int                        `json:"deleted"`
+	Errors       int                        `json:"errors"`
+	ErrorDetails []string                   `json:"errorDetails,omitempty"`
+	Message      string                     `json:"message"`
+	PerCalendar  map[string]*CalendarCounts `json:"perCalendar,omitempty"`
+}
+
+// addError logs an error, increments the count, and records the message.
+func (r *SyncResult) addError(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	log.Print(msg)
+	r.Errors++
+	r.ErrorDetails = append(r.ErrorDetails, msg)
 }
 
 func (r *SyncResult) calCounts(name string) *CalendarCounts {
@@ -109,8 +118,7 @@ func RunSyncWithOptions(ctx context.Context, token string, store *Store, config 
 		err := syncSourceToHub(ctx, token, store, config, &source, syncDays, dryRun, result)
 		recordDelta(source.CalendarName, c0, u0, d0)
 		if err != nil {
-			log.Printf("inbound sync error for %s: %v", source.CalendarName, err)
-			result.Errors++
+			result.addError("inbound sync error for %s: %v", source.CalendarName, err)
 		}
 	}
 
@@ -119,8 +127,7 @@ func RunSyncWithOptions(ctx context.Context, token string, store *Store, config 
 	// to the API yet due to eventual consistency. They will propagate on the
 	// next sync pass. This is an accepted trade-off.
 	if err := syncHubToSources(ctx, token, store, config, sources, dryRun, result); err != nil {
-		log.Printf("outbound sync error: %v", err)
-		result.Errors++
+		result.addError("outbound sync error: %v", err)
 	}
 
 	// Phase 3: Cleanup — delete placeholders for removed source calendars
@@ -143,6 +150,9 @@ func RunSyncWithOptions(ctx context.Context, token string, store *Store, config 
 		syncLog.Status = "completed"
 		if result.Errors > 0 {
 			syncLog.Status = "completed_with_errors"
+			if errJSON, err := json.Marshal(result.ErrorDetails); err == nil {
+				syncLog.ErrorDetails = string(errJSON)
+			}
 		}
 		if result.PerCalendar != nil {
 			if detailsJSON, err := json.Marshal(result.PerCalendar); err == nil {
@@ -264,8 +274,7 @@ func syncSourceToHub(ctx context.Context, token string, store *Store, config *Sy
 						SourceUpdated:    event.Updated,
 					})
 					if err != nil {
-						log.Printf("failed to adopt existing placeholder: %v", err)
-						result.Errors++
+						result.addError("failed to adopt existing placeholder: %v", err)
 					}
 				}
 				delete(syncedBySourceID, event.ID)
@@ -279,8 +288,7 @@ func syncSourceToHub(ctx context.Context, token string, store *Store, config *Sy
 			}
 			created, err := CreateEvent(ctx, token, hubCalID, &placeholder)
 			if err != nil {
-				log.Printf("failed to create placeholder for %s: %v", event.Summary, err)
-				result.Errors++
+				result.addError("failed to create placeholder for %s: %v", event.Summary, err)
 				continue
 			}
 			err = store.CreateSyncedEvent(&SyncedEvent{
@@ -292,8 +300,7 @@ func syncSourceToHub(ctx context.Context, token string, store *Store, config *Sy
 				SourceUpdated:    event.Updated,
 			})
 			if err != nil {
-				log.Printf("failed to store synced event: %v", err)
-				result.Errors++
+				result.addError("failed to store synced event: %v", err)
 				continue
 			}
 			result.Created++
@@ -309,8 +316,7 @@ func syncSourceToHub(ctx context.Context, token string, store *Store, config *Sy
 					log.Printf("placeholder for %s was deleted, will recreate next pass", event.Summary)
 					store.DeleteSyncedEvent(existingSynced.ID)
 				} else {
-					log.Printf("failed to update placeholder for %s: %v", event.Summary, err)
-					result.Errors++
+					result.addError("failed to update placeholder for %s: %v", event.Summary, err)
 				}
 				continue
 			}
@@ -390,8 +396,7 @@ func syncHubToSources(ctx context.Context, token string, store *Store, config *S
 	for _, source := range sources {
 		c0, u0, d0 := result.Created, result.Updated, result.Deleted
 		if err := syncOutboundToSource(ctx, token, store, config, &source, hubEvents, dryRun, result); err != nil {
-			log.Printf("outbound sync error for %s: %v", source.CalendarName, err)
-			result.Errors++
+			result.addError("outbound sync error for %s: %v", source.CalendarName, err)
 		}
 		cc := result.calCounts(source.CalendarName)
 		cc.Created += result.Created - c0
@@ -475,8 +480,7 @@ func syncOutboundToSource(ctx context.Context, token string, store *Store, confi
 					SourceUpdated:    he.event.Updated,
 				})
 				if err != nil {
-					log.Printf("failed to adopt outbound placeholder: %v", err)
-					result.Errors++
+					result.addError("failed to adopt outbound placeholder: %v", err)
 				}
 				delete(syncedByKey, key)
 				continue
@@ -494,8 +498,7 @@ func syncOutboundToSource(ctx context.Context, token string, store *Store, confi
 					log.Printf("skipping read-only calendar %s", source.CalendarName)
 					return nil // skip entire calendar
 				}
-				log.Printf("failed to create outbound placeholder on %s: %v", source.CalendarName, err)
-				result.Errors++
+				result.addError("failed to create outbound placeholder on %s: %v", source.CalendarName, err)
 				continue
 			}
 			err = store.CreateSyncedEvent(&SyncedEvent{
@@ -507,8 +510,7 @@ func syncOutboundToSource(ctx context.Context, token string, store *Store, confi
 				SourceUpdated:    he.event.Updated,
 			})
 			if err != nil {
-				log.Printf("failed to store outbound synced event: %v", err)
-				result.Errors++
+				result.addError("failed to store outbound synced event: %v", err)
 				continue
 			}
 			result.Created++
@@ -529,8 +531,7 @@ func syncOutboundToSource(ctx context.Context, token string, store *Store, confi
 					store.DeleteSyncedEvent(existingSe.ID)
 					continue
 				}
-				log.Printf("failed to update outbound placeholder on %s: %v", source.CalendarName, err)
-				result.Errors++
+				result.addError("failed to update outbound placeholder on %s: %v", source.CalendarName, err)
 				continue
 			}
 			existingSe.SourceUpdated = he.event.Updated
@@ -665,8 +666,7 @@ func cleanupPastEvents(ctx context.Context, token string, store *Store, config *
 			// Past event — delete the placeholder
 			err := DeleteEvent(ctx, token, calID, p.ID)
 			if err != nil && !isNotFoundError(err) {
-				log.Printf("past cleanup: failed to delete %s: %v", p.ID, err)
-				result.Errors++
+				result.addError("past cleanup: failed to delete %s: %v", p.ID, err)
 				continue
 			}
 

@@ -63,6 +63,7 @@ type SyncLog struct {
 	Errors      int    `json:"errors"      store:"errors"`
 	Status      string `json:"status"      store:"status"`
 	ErrorMsg    string `json:"errorMsg"    store:"error_msg"`
+	ErrorDetails string `json:"errorDetails" store:"error_details"` // JSON: []string of error messages
 	Details     string `json:"details"     store:"details"` // JSON: map[calendarName]{created,updated,deleted}
 }
 
