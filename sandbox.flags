@@ -1,0 +1,6 @@
+# Project-specific nono sandbox capabilities.
+# Sourced by ./sandbox — edit this file, not ./sandbox.
+
+APP_FLAGS="$APP_FLAGS --allow $HOME/.config/calendar-sync"
+APP_FLAGS="$APP_FLAGS --allow $HOME/go"
+APP_FLAGS="$APP_FLAGS --allow-bind 4004"
