@@ -130,14 +130,21 @@ func RunSyncWithOptions(ctx context.Context, token string, store *Store, config 
 		result.addError("outbound sync error: %v", err)
 	}
 
-	// Phase 3: Cleanup — delete placeholders for removed source calendars
+	// Phases 3 & 4: Cleanup. Both scan the user's full synced-event set, so load
+	// it once and share it instead of scanning twice.
 	if !dryRun {
-		cleanupRemovedSources(ctx, token, store, config, sources, result)
-	}
-
-	// Phase 4: Cleanup — delete placeholders for past events (end date before today)
-	if !dryRun {
-		cleanupPastEvents(ctx, token, store, config, sources, result)
+		allSynced, err := store.GetSyncedEventsForUser(config.UserID)
+		if err != nil {
+			log.Printf("cleanup: failed to load synced events: %v", err)
+		} else {
+			// Phase 3: delete placeholders for removed source calendars
+			cleanupRemovedSources(ctx, token, store, sources, allSynced, result)
+			// Phase 4: delete placeholders for past events. allSynced is the
+			// pre-Phase-3 snapshot, so it may still list records Phase 3 just
+			// deleted — harmless: the placeholder scan comes fresh from the API,
+			// and DeleteSyncedEvent on an already-removed ID is a no-op.
+			cleanupPastEvents(ctx, token, store, config, sources, allSynced, result)
+		}
 	}
 
 	// Complete sync log
@@ -374,6 +381,13 @@ func syncHubToSources(ctx context.Context, token string, store *Store, config *S
 		return fmt.Errorf("fetching hub placeholders: %w", err)
 	}
 
+	// Load the user's synced events once and reuse across every target calendar,
+	// instead of scanning the full collection once per source.
+	allSynced, err := store.GetSyncedEventsForUser(config.UserID)
+	if err != nil {
+		return fmt.Errorf("loading outbound synced events: %w", err)
+	}
+
 	// Index hub placeholders by sourceEventID for lookup
 	var hubEvents []hubEvent
 	for _, p := range hubPlaceholders {
@@ -395,7 +409,7 @@ func syncHubToSources(ctx context.Context, token string, store *Store, config *S
 	// For each source calendar, propagate hub events that didn't originate from it
 	for _, source := range sources {
 		c0, u0, d0 := result.Created, result.Updated, result.Deleted
-		if err := syncOutboundToSource(ctx, token, store, config, &source, hubEvents, dryRun, result); err != nil {
+		if err := syncOutboundToSource(ctx, token, store, config, &source, hubEvents, allSynced, dryRun, result); err != nil {
 			result.addError("outbound sync error for %s: %v", source.CalendarName, err)
 		}
 		cc := result.calCounts(source.CalendarName)
@@ -407,13 +421,16 @@ func syncHubToSources(ctx context.Context, token string, store *Store, config *S
 	return nil
 }
 
-func syncOutboundToSource(ctx context.Context, token string, store *Store, config *SyncConfig, source *SourceCalendar, hubEvents []hubEvent, dryRun bool, result *SyncResult) error {
+func syncOutboundToSource(ctx context.Context, token string, store *Store, config *SyncConfig, source *SourceCalendar, hubEvents []hubEvent, allSynced []SyncedEvent, dryRun bool, result *SyncResult) error {
 	targetCalID := source.CalendarID
 
-	// Load existing outbound SyncedEvent records for this target calendar
-	existingSynced, err := store.GetSyncedEventsForTarget(config.UserID, targetCalID)
-	if err != nil {
-		return fmt.Errorf("loading outbound synced events: %w", err)
+	// Filter the preloaded, user-scoped synced-event set to those targeting this
+	// calendar, instead of running a per-source full-collection scan.
+	var existingSynced []SyncedEvent
+	for _, se := range allSynced {
+		if se.TargetCalendarID == targetCalID {
+			existingSynced = append(existingSynced, se)
+		}
 	}
 
 	// Fetch existing placeholders on this target calendar for adoption after DB wipe
@@ -583,18 +600,11 @@ func shouldSkipEventType(eventType string) bool {
 // source calendars no longer in the active config. This handles the case where
 // a user unchecks a source calendar — all its placeholders (on the hub and on
 // other source calendars) should be removed.
-func cleanupRemovedSources(ctx context.Context, token string, store *Store, config *SyncConfig, activeSources []SourceCalendar, result *SyncResult) {
+func cleanupRemovedSources(ctx context.Context, token string, store *Store, activeSources []SourceCalendar, allSynced []SyncedEvent, result *SyncResult) {
 	// Build set of active source calendar IDs
 	activeIDs := make(map[string]bool, len(activeSources))
 	for _, s := range activeSources {
 		activeIDs[s.CalendarID] = true
-	}
-
-	// Find all SyncedEvent records for this user
-	allSynced, err := store.GetSyncedEventsForUser(config.UserID)
-	if err != nil {
-		log.Printf("cleanup: failed to load synced events: %v", err)
-		return
 	}
 
 	// Group deletions by target calendar for batching
@@ -622,14 +632,9 @@ func cleanupRemovedSources(ctx context.Context, token string, store *Store, conf
 
 // cleanupPastEvents deletes placeholder events whose end date is before today.
 // Placeholders only exist to prevent meeting conflicts — past events don't need them.
-func cleanupPastEvents(ctx context.Context, token string, store *Store, config *SyncConfig, sources []SourceCalendar, result *SyncResult) {
+func cleanupPastEvents(ctx context.Context, token string, store *Store, config *SyncConfig, sources []SourceCalendar, allSynced []SyncedEvent, result *SyncResult) {
 	today := time.Now().UTC().Truncate(24 * time.Hour).Format("2006-01-02")
 
-	allSynced, err := store.GetSyncedEventsForUser(config.UserID)
-	if err != nil {
-		log.Printf("past cleanup: failed to load synced events: %v", err)
-		return
-	}
 	if len(allSynced) == 0 {
 		return
 	}
@@ -670,13 +675,25 @@ func cleanupPastEvents(ctx context.Context, token string, store *Store, config *
 				continue
 			}
 
-			// Remove the SyncedEvent record if one exists
+			// Remove the SyncedEvent record if one exists. Prefer the exact
+			// placeholder match (TargetEventID == p.ID) over the (calendar, source
+			// event) heuristic: allSynced is a pre-cleanup snapshot that may still
+			// list a same-key record whose placeholder was already removed, and the
+			// heuristic could match that ghost instead of the live record.
 			srcEventID := SourceEventID(p)
-			for _, se := range allSynced {
-				if se.TargetEventID == p.ID || (se.TargetCalendarID == calID && se.SourceEventID == srcEventID) {
-					store.DeleteSyncedEvent(se.ID)
+			var match *SyncedEvent
+			for i := range allSynced {
+				se := &allSynced[i]
+				if se.TargetEventID == p.ID {
+					match = se
 					break
 				}
+				if match == nil && se.TargetCalendarID == calID && se.SourceEventID == srcEventID {
+					match = se
+				}
+			}
+			if match != nil {
+				store.DeleteSyncedEvent(match.ID)
 			}
 			result.Deleted++
 		}

@@ -286,21 +286,6 @@ func (s *Store) GetSyncedEventsForUser(userID string) ([]SyncedEvent, error) {
 	return s.SyncedEvents.Where("user_id", "==", userID).All()
 }
 
-// GetSyncedEventsForTarget returns all synced events targeting a specific calendar.
-func (s *Store) GetSyncedEventsForTarget(userID, targetCalID string) ([]SyncedEvent, error) {
-	all, err := s.SyncedEvents.Where("user_id", "==", userID).All()
-	if err != nil {
-		return nil, err
-	}
-	var filtered []SyncedEvent
-	for _, se := range all {
-		if se.TargetCalendarID == targetCalID {
-			filtered = append(filtered, se)
-		}
-	}
-	return filtered, nil
-}
-
 // CreateSyncedEvent inserts a new synced event mapping.
 func (s *Store) CreateSyncedEvent(se *SyncedEvent) error {
 	se.ID = uuid.New().String()
