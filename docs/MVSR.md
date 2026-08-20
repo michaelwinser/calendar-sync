@@ -64,6 +64,10 @@ Rather than doing pairwise sync across all selected calendars (which scales as O
 - An architecture review agent reviews the plan before implementation begins
 - See `docs/AGENTS.md` for the agent prompt
 
+### Platform Direction
+
+Beyond sync, the app has grown a second useful capability — a **Tools** page for bulk event search/delete — and will gain further calendar utilities (starting with a usage **heatmap**). These tools share little at the feature level but share the *expensive* substrate: one Google OAuth client, one authenticated session, one Calendar client, one deployment. The app is therefore evolving into a **modular calendar workbench** — independent tool modules (sync, tools, heatmap, …) behind shared auth, each owning its own routes and its own data namespace. See [DESIGN-platform.md](DESIGN-platform.md) for the architecture. Splitting into separate deployed apps is reserved for a real forcing function (a different OAuth scope, a different audience, or a heavier runtime), not the default.
+
 ## Roadmap
 
 > This roadmap is illustrative, not the formal engineering or product plan. It shows a reasonable progression of capabilities and outcomes towards the end goal.
@@ -76,3 +80,6 @@ Rather than doing pairwise sync across all selected calendars (which scales as O
 | **M3** | One-way sync from each selected calendar to the hub calendar. Sync handles creation, update, and deletion of events. |
 | **M4** | Two-way sync from the hub to each calendar. Sync correctly propagates creation, update, and deletion of events from the original calendar to the hub and then onwards to all calendars. |
 | **M5** | Polish and enhancements as determined during development. |
+| **M6** | Modular foundation: extract the Tools (bulk search/delete) into its own module behind a shared calendar/bulk-ops layer, and fix bulk delete for large selections (client-chunked progress, bounded concurrency). |
+| **M7** | Heatmap module: bring the weekly-occupancy heatmap into the app (read-only), retiring the standalone Apps Script version. |
+| **M8** | Modularize sync into its own module and migrate its data to module-owned, prefixed collections; retire the shared all-tables store. |
