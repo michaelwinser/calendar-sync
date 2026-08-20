@@ -1,0 +1,25 @@
+package app
+
+import "github.com/michaelwinser/calendar-sync/internal/platform"
+
+// RegisterRoutes wires the app's API routes (sync, config, tools, status) plus the
+// unauthenticated nudge endpoint. Called at setup. It builds the module's store
+// from the shared DB. (Tools and sync split into their own modules in later M6/M8
+// steps; for now they share this Server.)
+func RegisterRoutes(deps platform.Deps) error {
+	store, err := NewStore(deps.DB)
+	if err != nil {
+		return err
+	}
+	s := &Server{Store: store, Google: deps.Google, Cal: deps.Cal}
+	s.registerAPI(deps.Router)
+	// Nudge is mounted outside /api/ to bypass session auth; it does its own auth.
+	deps.Router.Post("/sync/nudge", s.NudgeSync)
+	return nil
+}
+
+// RegisterPages wires the app's authenticated HTML pages. Called at serve.
+func RegisterPages(deps platform.Deps) {
+	deps.Router.Get("/tools", deps.LoginPage(toolsHandler))
+	deps.Router.Get("/*", deps.LoginPage(homeHandler))
+}
