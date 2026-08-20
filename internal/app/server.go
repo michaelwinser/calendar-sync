@@ -53,8 +53,8 @@ func getAccessToken(r *http.Request, google *auth.GoogleAuth) (string, error) {
 	return token, nil
 }
 
-// RegisterRoutes adds all API routes to the router.
-func (s *Server) RegisterRoutes(r chi.Router) {
+// registerAPI mounts the app's API routes on r.
+func (s *Server) registerAPI(r chi.Router) {
 	r.Get("/api/calendars", s.ListCalendars)
 	r.Get("/api/config", s.GetConfig)
 	r.Put("/api/config", s.PutConfig)
