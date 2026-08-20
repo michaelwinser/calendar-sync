@@ -8,6 +8,8 @@ import (
 	"log"
 	"strings"
 	"time"
+
+	"github.com/michaelwinser/calendar-sync/internal/platform/calendar"
 )
 
 // hubEvent represents a placeholder on the hub with its source metadata.
@@ -60,17 +62,17 @@ type SyncOptions struct {
 }
 
 // RunSync executes a full sync pass using the configured sync window.
-func RunSync(ctx context.Context, token string, store *Store, config *SyncConfig, sources []SourceCalendar) (*SyncResult, error) {
-	return RunSyncWithOptions(ctx, token, store, config, sources, SyncOptions{})
+func RunSync(ctx context.Context, cal *calendar.Client, token string, store *Store, config *SyncConfig, sources []SourceCalendar) (*SyncResult, error) {
+	return RunSyncWithOptions(ctx, cal, token, store, config, sources, SyncOptions{})
 }
 
 // RunSyncWithDays executes a full sync pass with an explicit window in days.
-func RunSyncWithDays(ctx context.Context, token string, store *Store, config *SyncConfig, sources []SourceCalendar, syncDays int) (*SyncResult, error) {
-	return RunSyncWithOptions(ctx, token, store, config, sources, SyncOptions{SyncDays: syncDays})
+func RunSyncWithDays(ctx context.Context, cal *calendar.Client, token string, store *Store, config *SyncConfig, sources []SourceCalendar, syncDays int) (*SyncResult, error) {
+	return RunSyncWithOptions(ctx, cal, token, store, config, sources, SyncOptions{SyncDays: syncDays})
 }
 
 // RunSyncWithOptions executes a full sync pass with explicit options.
-func RunSyncWithOptions(ctx context.Context, token string, store *Store, config *SyncConfig, sources []SourceCalendar, opts SyncOptions) (*SyncResult, error) {
+func RunSyncWithOptions(ctx context.Context, cal *calendar.Client, token string, store *Store, config *SyncConfig, sources []SourceCalendar, opts SyncOptions) (*SyncResult, error) {
 	readsBefore := store.Reads()
 	syncDays := opts.SyncDays
 	if syncDays <= 0 {
@@ -116,7 +118,7 @@ func RunSyncWithOptions(ctx context.Context, token string, store *Store, config 
 	// Phase 1: Inbound — sync each source calendar to the hub
 	for _, source := range sources {
 		c0, u0, d0 := snapshot()
-		err := syncSourceToHub(ctx, token, store, config, &source, syncDays, dryRun, result)
+		err := syncSourceToHub(ctx, cal, token, store, config, &source, syncDays, dryRun, result)
 		recordDelta(source.CalendarName, c0, u0, d0)
 		if err != nil {
 			result.addError("inbound sync error for %s: %v", source.CalendarName, err)
@@ -127,7 +129,7 @@ func RunSyncWithOptions(ctx context.Context, token string, store *Store, config 
 	// Note: newly created/deleted hub events from Phase 1 may not be visible
 	// to the API yet due to eventual consistency. They will propagate on the
 	// next sync pass. This is an accepted trade-off.
-	if err := syncHubToSources(ctx, token, store, config, sources, dryRun, result); err != nil {
+	if err := syncHubToSources(ctx, cal, token, store, config, sources, dryRun, result); err != nil {
 		result.addError("outbound sync error: %v", err)
 	}
 
@@ -141,12 +143,12 @@ func RunSyncWithOptions(ctx context.Context, token string, store *Store, config 
 			result.addError("cleanup: failed to load synced events: %v", err)
 		} else {
 			// Phase 3: delete placeholders for removed source calendars
-			cleanupRemovedSources(ctx, token, store, sources, allSynced, result)
+			cleanupRemovedSources(ctx, cal, token, store, sources, allSynced, result)
 			// Phase 4: delete placeholders for past events. allSynced is the
 			// pre-Phase-3 snapshot, so it may still list records Phase 3 just
 			// deleted — harmless: the placeholder scan comes fresh from the API,
 			// and DeleteSyncedEvent on an already-removed ID is a no-op.
-			cleanupPastEvents(ctx, token, store, config, sources, allSynced, result)
+			cleanupPastEvents(ctx, cal, token, store, config, sources, allSynced, result)
 		}
 	}
 
@@ -195,7 +197,7 @@ func RunSyncWithOptions(ctx context.Context, token string, store *Store, config 
 	return result, nil
 }
 
-func syncSourceToHub(ctx context.Context, token string, store *Store, config *SyncConfig, source *SourceCalendar, syncDays int, dryRun bool, result *SyncResult) error {
+func syncSourceToHub(ctx context.Context, cal *calendar.Client, token string, store *Store, config *SyncConfig, source *SourceCalendar, syncDays int, dryRun bool, result *SyncResult) error {
 	hubCalID := config.HubCalendarID
 
 	now := time.Now().UTC()
@@ -207,7 +209,7 @@ func syncSourceToHub(ctx context.Context, token string, store *Store, config *Sy
 	var newSyncToken string
 
 	if source.SyncToken != "" {
-		res, err := ListEventsIncremental(ctx, token, source.CalendarID, source.SyncToken)
+		res, err := cal.ListEventsIncremental(ctx, token, source.CalendarID, source.SyncToken)
 		if errors.Is(err, ErrSyncTokenExpired) {
 			log.Printf("sync token expired for %s, falling back to full sync", source.CalendarName)
 			source.SyncToken = ""
@@ -222,7 +224,7 @@ func syncSourceToHub(ctx context.Context, token string, store *Store, config *Sy
 
 	if source.SyncToken == "" {
 		// Full sync
-		res, err := ListEvents(ctx, token, source.CalendarID, timeMin, timeMax)
+		res, err := cal.ListEvents(ctx, token, source.CalendarID, timeMin, timeMax)
 		if err != nil {
 			return fmt.Errorf("fetching events from %s: %w", source.CalendarName, err)
 		}
@@ -231,7 +233,7 @@ func syncSourceToHub(ctx context.Context, token string, store *Store, config *Sy
 	}
 
 	// 2. Fetch existing placeholders on hub for this source
-	placeholders, err := ListPlaceholders(ctx, token, hubCalID, source.CalendarID)
+	placeholders, err := ListPlaceholders(ctx, cal, token, hubCalID, source.CalendarID)
 	if err != nil {
 		return fmt.Errorf("fetching placeholders for %s: %w", source.CalendarName, err)
 	}
@@ -305,7 +307,7 @@ func syncSourceToHub(ctx context.Context, token string, store *Store, config *Sy
 				result.Created++
 				continue
 			}
-			created, err := CreateEvent(ctx, token, hubCalID, &placeholder)
+			created, err := cal.CreateEvent(ctx, token, hubCalID, &placeholder)
 			if err != nil {
 				result.addError("failed to create placeholder for %s: %v", event.Summary, err)
 				continue
@@ -329,7 +331,7 @@ func syncSourceToHub(ctx context.Context, token string, store *Store, config *Sy
 				result.Updated++
 				continue
 			}
-			_, err := UpdateEvent(ctx, token, hubCalID, existingSynced.TargetEventID, &placeholder)
+			_, err := cal.UpdateEvent(ctx, token, hubCalID, existingSynced.TargetEventID, &placeholder)
 			if err != nil {
 				if isNotFoundError(err) {
 					log.Printf("placeholder for %s was deleted, will recreate next pass", event.Summary)
@@ -362,7 +364,7 @@ func syncSourceToHub(ctx context.Context, token string, store *Store, config *Sy
 				deleteIDs = append(deleteIDs, se.TargetEventID)
 				deleteRecords = append(deleteRecords, se)
 			}
-			deleted, errs := BatchDeleteEvents(ctx, token, hubCalID, deleteIDs)
+			deleted, errs := cal.BatchDeleteEvents(ctx, token, hubCalID, deleteIDs)
 			result.Deleted += deleted
 			result.Errors += errs
 			for _, se := range deleteRecords {
@@ -384,11 +386,11 @@ func syncSourceToHub(ctx context.Context, token string, store *Store, config *Sy
 // syncHubToSources syncs hub placeholders outbound to each source calendar.
 // For each source calendar S, it creates/updates/deletes placeholders for
 // hub events that did NOT originate from S (no self-sync).
-func syncHubToSources(ctx context.Context, token string, store *Store, config *SyncConfig, sources []SourceCalendar, dryRun bool, result *SyncResult) error {
+func syncHubToSources(ctx context.Context, cal *calendar.Client, token string, store *Store, config *SyncConfig, sources []SourceCalendar, dryRun bool, result *SyncResult) error {
 	hubCalID := config.HubCalendarID
 
 	// Fetch ALL hub placeholders as ground truth for what should exist outbound.
-	hubPlaceholders, err := ListAllPlaceholders(ctx, token, hubCalID)
+	hubPlaceholders, err := ListAllPlaceholders(ctx, cal, token, hubCalID)
 	if err != nil {
 		return fmt.Errorf("fetching hub placeholders: %w", err)
 	}
@@ -421,7 +423,7 @@ func syncHubToSources(ctx context.Context, token string, store *Store, config *S
 	// For each source calendar, propagate hub events that didn't originate from it
 	for _, source := range sources {
 		c0, u0, d0 := result.Created, result.Updated, result.Deleted
-		if err := syncOutboundToSource(ctx, token, store, config, &source, hubEvents, allSynced, dryRun, result); err != nil {
+		if err := syncOutboundToSource(ctx, cal, token, store, config, &source, hubEvents, allSynced, dryRun, result); err != nil {
 			result.addError("outbound sync error for %s: %v", source.CalendarName, err)
 		}
 		cc := result.calCounts(source.CalendarName)
@@ -433,7 +435,7 @@ func syncHubToSources(ctx context.Context, token string, store *Store, config *S
 	return nil
 }
 
-func syncOutboundToSource(ctx context.Context, token string, store *Store, config *SyncConfig, source *SourceCalendar, hubEvents []hubEvent, allSynced []SyncedEvent, dryRun bool, result *SyncResult) error {
+func syncOutboundToSource(ctx context.Context, cal *calendar.Client, token string, store *Store, config *SyncConfig, source *SourceCalendar, hubEvents []hubEvent, allSynced []SyncedEvent, dryRun bool, result *SyncResult) error {
 	targetCalID := source.CalendarID
 
 	// Filter the preloaded, user-scoped synced-event set to those targeting this
@@ -446,7 +448,7 @@ func syncOutboundToSource(ctx context.Context, token string, store *Store, confi
 	}
 
 	// Fetch existing placeholders on this target calendar for adoption after DB wipe
-	existingPlaceholders, err := ListAllPlaceholders(ctx, token, targetCalID)
+	existingPlaceholders, err := ListAllPlaceholders(ctx, cal, token, targetCalID)
 	if err != nil {
 		// If we can't list (e.g. read-only), skip this calendar
 		if isPermissionError(err) {
@@ -520,7 +522,7 @@ func syncOutboundToSource(ctx context.Context, token string, store *Store, confi
 				result.Created++
 				continue
 			}
-			created, err := CreateEvent(ctx, token, targetCalID, &placeholder)
+			created, err := cal.CreateEvent(ctx, token, targetCalID, &placeholder)
 			if err != nil {
 				// Silently skip read-only calendars (UC-0047)
 				if isPermissionError(err) {
@@ -550,7 +552,7 @@ func syncOutboundToSource(ctx context.Context, token string, store *Store, confi
 				delete(syncedByKey, key)
 				continue
 			}
-			_, err := UpdateEvent(ctx, token, targetCalID, existingSe.TargetEventID, &placeholder)
+			_, err := cal.UpdateEvent(ctx, token, targetCalID, existingSe.TargetEventID, &placeholder)
 			if err != nil {
 				if isPermissionError(err) {
 					return nil
@@ -588,7 +590,7 @@ func syncOutboundToSource(ctx context.Context, token string, store *Store, confi
 		if dryRun {
 			result.Deleted += len(outboundDeleteIDs)
 		} else {
-			deleted, errs := BatchDeleteEvents(ctx, token, targetCalID, outboundDeleteIDs)
+			deleted, errs := cal.BatchDeleteEvents(ctx, token, targetCalID, outboundDeleteIDs)
 			result.Deleted += deleted
 			result.Errors += errs
 			for _, se := range outboundDeleteRecords {
@@ -612,7 +614,7 @@ func shouldSkipEventType(eventType string) bool {
 // source calendars no longer in the active config. This handles the case where
 // a user unchecks a source calendar — all its placeholders (on the hub and on
 // other source calendars) should be removed.
-func cleanupRemovedSources(ctx context.Context, token string, store *Store, activeSources []SourceCalendar, allSynced []SyncedEvent, result *SyncResult) {
+func cleanupRemovedSources(ctx context.Context, cal *calendar.Client, token string, store *Store, activeSources []SourceCalendar, allSynced []SyncedEvent, result *SyncResult) {
 	// Build set of active source calendar IDs
 	activeIDs := make(map[string]bool, len(activeSources))
 	for _, s := range activeSources {
@@ -633,7 +635,7 @@ func cleanupRemovedSources(ctx context.Context, token string, store *Store, acti
 		for _, se := range records {
 			ids = append(ids, se.TargetEventID)
 		}
-		deleted, errs := BatchDeleteEvents(ctx, token, calID, ids)
+		deleted, errs := cal.BatchDeleteEvents(ctx, token, calID, ids)
 		result.Deleted += deleted
 		result.Errors += errs
 		for _, se := range records {
@@ -644,7 +646,7 @@ func cleanupRemovedSources(ctx context.Context, token string, store *Store, acti
 
 // cleanupPastEvents deletes placeholder events whose end date is before today.
 // Placeholders only exist to prevent meeting conflicts — past events don't need them.
-func cleanupPastEvents(ctx context.Context, token string, store *Store, config *SyncConfig, sources []SourceCalendar, allSynced []SyncedEvent, result *SyncResult) {
+func cleanupPastEvents(ctx context.Context, cal *calendar.Client, token string, store *Store, config *SyncConfig, sources []SourceCalendar, allSynced []SyncedEvent, result *SyncResult) {
 	today := time.Now().UTC().Truncate(24 * time.Hour).Format("2006-01-02")
 
 	if len(allSynced) == 0 {
@@ -660,7 +662,7 @@ func cleanupPastEvents(ctx context.Context, token string, store *Store, config *
 
 	// For each target calendar, find our placeholders and check end dates
 	for calID := range targetCalIDs {
-		placeholders, err := ListAllPlaceholders(ctx, token, calID)
+		placeholders, err := ListAllPlaceholders(ctx, cal, token, calID)
 		if err != nil {
 			log.Printf("past cleanup: failed to list placeholders on %s: %v", calID, err)
 			continue
@@ -681,7 +683,7 @@ func cleanupPastEvents(ctx context.Context, token string, store *Store, config *
 			}
 
 			// Past event — delete the placeholder
-			err := DeleteEvent(ctx, token, calID, p.ID)
+			err := cal.DeleteEvent(ctx, token, calID, p.ID)
 			if err != nil && !isNotFoundError(err) {
 				result.addError("past cleanup: failed to delete %s: %v", p.ID, err)
 				continue
