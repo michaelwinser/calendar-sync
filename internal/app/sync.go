@@ -71,6 +71,7 @@ func RunSyncWithDays(ctx context.Context, token string, store *Store, config *Sy
 
 // RunSyncWithOptions executes a full sync pass with explicit options.
 func RunSyncWithOptions(ctx context.Context, token string, store *Store, config *SyncConfig, sources []SourceCalendar, opts SyncOptions) (*SyncResult, error) {
+	readsBefore := store.Reads()
 	syncDays := opts.SyncDays
 	if syncDays <= 0 {
 		syncDays = config.SyncWindowWeeks * 7
@@ -135,7 +136,9 @@ func RunSyncWithOptions(ctx context.Context, token string, store *Store, config 
 	if !dryRun {
 		allSynced, err := store.GetSyncedEventsForUser(config.UserID)
 		if err != nil {
-			log.Printf("cleanup: failed to load synced events: %v", err)
+			// Surface as a sync error (counts toward result.Errors and shows in the
+			// log as completed_with_errors) rather than only emitting a log line.
+			result.addError("cleanup: failed to load synced events: %v", err)
 		} else {
 			// Phase 3: delete placeholders for removed source calendars
 			cleanupRemovedSources(ctx, token, store, sources, allSynced, result)
@@ -147,7 +150,8 @@ func RunSyncWithOptions(ctx context.Context, token string, store *Store, config 
 		}
 	}
 
-	// Complete sync log
+	// Complete sync log — every pass persists a durable row so the UI's log table
+	// stays a live heartbeat. Growth is bounded on view; see GetRecentSyncLogs.
 	if !dryRun {
 		syncLog.CompletedAt = time.Now().UTC().Format(time.RFC3339)
 		syncLog.Created = result.Created
@@ -179,6 +183,14 @@ func RunSyncWithOptions(ctx context.Context, token string, store *Store, config 
 	if result.Errors > 0 {
 		result.Message += fmt.Sprintf(", %d errors", result.Errors)
 	}
+
+	// Cost instrumentation: approximate Firestore documents read during this pass,
+	// from the store's process-wide counter. It covers the collection scans (the
+	// material cost) but not point lookups, and is only approximate if any other
+	// pass runs concurrently (the counter is process-wide, the guard only per-user).
+	// Enough to confirm the read-reduction work and flag regressions like unbounded growth.
+	log.Printf("sync user=%s firestore_reads~=%d created=%d updated=%d deleted=%d errors=%d",
+		config.UserID, store.Reads()-readsBefore, result.Created, result.Updated, result.Deleted, result.Errors)
 
 	return result, nil
 }

@@ -1,12 +1,24 @@
 package app
 
 import (
+	"log"
+	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/michaelwinser/appbase/db"
 	"github.com/michaelwinser/appbase/store"
 )
+
+// syncLogRetention caps how many sync logs we keep per user. Growth is trimmed
+// opportunistically on the (already full-reading) GetRecentSyncLogs path.
+const syncLogRetention = 200
+
+// syncLogTrimBatch bounds deletes per GetRecentSyncLogs call so an existing large
+// backlog drains over several page loads instead of adding many synchronous
+// deletes to one request. Kept small to keep that page load responsive.
+const syncLogTrimBatch = 50
 
 // SyncConfig holds a user's sync configuration. One per user.
 // Uniqueness of user_id is enforced at the application layer.
@@ -73,7 +85,18 @@ type Store struct {
 	Sources      *store.Collection[SourceCalendar]
 	SyncedEvents *store.Collection[SyncedEvent]
 	SyncLogs     *store.Collection[SyncLog]
+
+	// reads is a cumulative count of documents read from the backend across all
+	// query methods, for cost instrumentation. appbase reads (and Firestore bills)
+	// every document matching a query's first Where, so this proxies billed reads.
+	reads atomic.Int64
 }
+
+// addReads records docs read by a query (call with the raw pre-filter count).
+func (s *Store) addReads(n int) { s.reads.Add(int64(n)) }
+
+// Reads returns the cumulative document-read count since process start.
+func (s *Store) Reads() int64 { return s.reads.Load() }
 
 func NewStore(d *db.DB) (*Store, error) {
 	configs, err := store.NewCollection[SyncConfig](d, "sync_configs")
@@ -159,7 +182,11 @@ func (s *Store) SaveConfig(userID string, input SaveConfigInput) (*SyncConfig, e
 
 // GetSources returns all source calendars for a user.
 func (s *Store) GetSources(userID string) ([]SourceCalendar, error) {
-	return s.Sources.Where("user_id", "==", userID).All()
+	all, err := s.Sources.Where("user_id", "==", userID).All()
+	if err == nil {
+		s.addReads(len(all))
+	}
+	return all, err
 }
 
 // ReconcileSources updates the source calendar list to match the desired state.
@@ -253,7 +280,11 @@ func (s *Store) UpdateLastSyncAt(userID string) error {
 
 // GetAllConfigs returns all sync configs (for the nudge endpoint).
 func (s *Store) GetAllConfigs() ([]SyncConfig, error) {
-	return s.Configs.Where("hub_calendar_id", "!=", "").All()
+	all, err := s.Configs.Where("hub_calendar_id", "!=", "").All()
+	if err == nil {
+		s.addReads(len(all))
+	}
+	return all, err
 }
 
 // UpdateSourceSyncToken persists the syncToken for a source calendar.
@@ -272,6 +303,7 @@ func (s *Store) GetSyncedEvents(userID, sourceCalID, targetCalID string) ([]Sync
 	if err != nil {
 		return nil, err
 	}
+	s.addReads(len(all))
 	var filtered []SyncedEvent
 	for _, se := range all {
 		if se.UserID == userID && se.TargetCalendarID == targetCalID {
@@ -283,7 +315,11 @@ func (s *Store) GetSyncedEvents(userID, sourceCalID, targetCalID string) ([]Sync
 
 // GetSyncedEventsForUser returns all synced events for a user.
 func (s *Store) GetSyncedEventsForUser(userID string) ([]SyncedEvent, error) {
-	return s.SyncedEvents.Where("user_id", "==", userID).All()
+	all, err := s.SyncedEvents.Where("user_id", "==", userID).All()
+	if err == nil {
+		s.addReads(len(all))
+	}
+	return all, err
 }
 
 // CreateSyncedEvent inserts a new synced event mapping.
@@ -316,37 +352,74 @@ func (s *Store) UpdateSyncLog(log *SyncLog) error {
 	return s.SyncLogs.Update(log.ID, log)
 }
 
-// GetRecentSyncLogs returns the most recent sync logs for a user.
+// GetRecentSyncLogs returns a user's most recent sync logs, newest first, up to
+// limit. appbase@v0.2.3 pushes only the first Where to Firestore and can't push a
+// limit there, so this reads all of the user's logs — viewing the history is thus
+// the one read whose cost tracks log count. To keep that bounded it trims the
+// collection back toward syncLogRetention here (delete-only, capped at
+// syncLogTrimBatch per call so a large backlog drains over several views rather
+// than blocking one request). A never-viewed history just accumulates as cheap
+// storage; the status-scoped GetRunningSyncLog means log count no longer affects
+// per-sync read cost.
 func (s *Store) GetRecentSyncLogs(userID string, limit int) ([]SyncLog, error) {
-	all, err := s.SyncLogs.Where("user_id", "==", userID).OrderBy("started_at", store.Desc).All()
+	all, err := s.SyncLogs.Where("user_id", "==", userID).All()
 	if err != nil {
 		return nil, err
 	}
+	s.addReads(len(all))
+
+	// Sort newest-first ourselves rather than trusting the backend's ordering: this
+	// drives irreversible deletes, so it must not depend on appbase's OrderBy.
+	sort.Slice(all, func(i, j int) bool { return all[i].StartedAt > all[j].StartedAt })
+
+	if excess := len(all) - syncLogRetention; excess > 0 {
+		if excess > syncLogTrimBatch {
+			excess = syncLogTrimBatch
+		}
+		for _, old := range all[len(all)-excess:] { // oldest are the tail
+			if err := s.SyncLogs.Delete(old.ID); err != nil {
+				log.Printf("sync log retention: failed to delete %s: %v", old.ID, err)
+			}
+		}
+		all = all[:len(all)-excess]
+	}
+
 	if len(all) > limit {
 		all = all[:limit]
 	}
 	return all, nil
 }
 
-// GetRunningSyncLog returns a sync log with status "running" if one exists.
+// GetRunningSyncLog returns the requesting user's running sync log if one exists.
+// It queries by status (the pushed-down predicate) so the backend returns only
+// running logs (typically 0-1), not the user's entire history; the user match is
+// applied in memory since appbase pushes just the first Where (see GetRecentSyncLogs).
+// It also reaps stale running rows so the running set can't grow monotonically: the
+// caller's own after 5 minutes (a crashed mid-sync), and anyone's after an hour
+// (an abandoned account's — no real sync runs that long), while never failing another
+// user's merely-long in-flight sync.
 func (s *Store) GetRunningSyncLog(userID string) (*SyncLog, error) {
-	logs, err := s.SyncLogs.Where("user_id", "==", userID).All()
+	logs, err := s.SyncLogs.Where("status", "==", "running").All()
 	if err != nil {
 		return nil, err
 	}
-	staleThreshold := time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339)
+	s.addReads(len(logs))
+	now := time.Now().UTC()
+	ownStale := now.Add(-5 * time.Minute).Format(time.RFC3339)
+	abandoned := now.Add(-1 * time.Hour).Format(time.RFC3339)
 	for i := range logs {
-		if logs[i].Status == "running" {
-			// Mark stale running logs as failed
-			if logs[i].StartedAt < staleThreshold {
-				logs[i].Status = "failed"
-				logs[i].ErrorMsg = "timed out"
-				logs[i].CompletedAt = time.Now().UTC().Format(time.RFC3339)
-				s.SyncLogs.Update(logs[i].ID, &logs[i])
-				continue
-			}
-			return &logs[i], nil
+		veryOld := logs[i].StartedAt < abandoned
+		if logs[i].UserID != userID && !veryOld {
+			continue // another user's in-flight sync — leave it alone
 		}
+		if veryOld || logs[i].StartedAt < ownStale {
+			logs[i].Status = "failed"
+			logs[i].ErrorMsg = "timed out"
+			logs[i].CompletedAt = now.Format(time.RFC3339)
+			s.SyncLogs.Update(logs[i].ID, &logs[i])
+			continue
+		}
+		return &logs[i], nil // our own active running sync
 	}
 	return nil, nil
 }
