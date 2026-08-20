@@ -86,6 +86,18 @@ Calendar Sync keeps a user's free/busy status consistent across multiple Google 
 | UC-0059 | Per-calendar sync log | Sync logs include per-calendar breakdowns of created/updated/deleted counts, shown in the UI. |
 | UC-0060 | Hub change cleans up old hub | When the hub calendar is changed, the next sync pass deletes all placeholder events from the old hub and removes outbound placeholders on source calendars that were synced from the old hub. Corresponding SyncedEvent records are cleaned up. |
 
+### M6 — Modular Tools and Bulk Operations
+
+The Tools feature (bulk search/delete) predates formal use-case coverage; M6 captures its behavior, moves it into its own module, and fixes bulk delete for large selections. Definitions: a **tool** is a self-contained utility module behind the shared auth (own routes, own data namespace); **bulk operation** is a Calendar action applied to many events in one user request.
+
+| ID | Use Case | Description |
+|----|----------|-------------|
+| UC-0070 | Search events on a calendar | An authenticated user searches a chosen calendar for events matching filters (time range, title substring), and receives the matching events (id, title, start/end). |
+| UC-0071 | Bulk delete selected events | The user selects events from search results and deletes them in one action. The operation reports how many were deleted and how many failed. |
+| UC-0072 | Large bulk delete completes with progress | Deleting a large selection (500+ events) completes reliably with visible progress and without a silent request timeout. |
+| UC-0073 | Accurate bulk-delete result reporting | When some deletes fail, the reported deleted/failed counts are accurate (no miscount from response parsing). |
+| UC-0074 | Tool served from its own module | The Tools feature is served from an isolated module with its own routes (`/api/tools/...`) and owns no shared sync data; extracting it preserves existing behavior. |
+
 ## Future Considerations
 
 The following are not in the current roadmap but are anticipated extensions:
@@ -107,7 +119,9 @@ The following are not in the current roadmap but are anticipated extensions:
 | NFR-02 | The app runs on localhost, TrueNAS (Docker), and Cloud Run without code changes — only configuration differs. |
 | NFR-03 | All state is stored in SQLite (local/TrueNAS) or Firestore (Cloud Run). No other persistence dependencies. |
 | NFR-04 | The app handles Google Calendar API rate limits gracefully (exponential backoff, no data loss). |
-| NFR-05 | OAuth token refresh is handled transparently — a sync pass does not fail due to an expired access token if a valid refresh token exists. |
+| NFR-05 | OAuth token refresh is handled transparently — a sync pass or bulk operation does not fail due to an expired access token if a valid refresh token exists, including across a multi-request bulk operation. |
+| NFR-06 | Bulk operations over many events complete without exceeding request timeouts and surface progress to the user, rather than appearing to hang. |
+| NFR-07 | Each tool module owns its own store collections under a module-prefixed namespace; modules access another module's data only through its exported API, never its raw collections. |
 
 ## Use Case Status
 
@@ -119,4 +133,5 @@ Track implementation status here. E2e tests for all "done" use cases must pass i
 | M2 | UC-0010 – UC-0016 | done (UC-0010 manual only) |
 | M3 | UC-0020 – UC-0034 | done (UC-0020–UC-0028, UC-0031–UC-0034 manual only) |
 | M4 | UC-0040 – UC-0049 | done (UC-0040–UC-0049 manual only) |
-| M5 | UC-0050 – UC-0060 | not started |
+| M5 | UC-0050 – UC-0060 | implemented (manual only); e2e status audit pending |
+| M6 | UC-0070 – UC-0074 | not started |
