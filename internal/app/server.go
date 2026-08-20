@@ -13,12 +13,14 @@ import (
 	"github.com/michaelwinser/appbase"
 	"github.com/michaelwinser/appbase/auth"
 	"github.com/michaelwinser/appbase/server"
+	"github.com/michaelwinser/calendar-sync/internal/platform/calendar"
 )
 
 // Server handles API requests.
 type Server struct {
 	Store  *Store
 	Google *auth.GoogleAuth
+	Cal    *calendar.Client
 }
 
 // getAccessToken returns the OAuth access token, refreshing if expired.
@@ -87,7 +89,7 @@ func (s *Server) ListCalendars(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	calendars, err := ListCalendars(r.Context(), token)
+	calendars, err := s.Cal.ListCalendars(r.Context(), token)
 	if err != nil {
 		server.RespondError(w, http.StatusBadGateway, "Google Calendar API: "+err.Error())
 		return
@@ -281,7 +283,7 @@ func (s *Server) TriggerSync(w http.ResponseWriter, r *http.Request) {
 	}
 	dryRun := r.URL.Query().Get("dryRun") == "true"
 
-	result, err := RunSyncWithOptions(r.Context(), token, s.Store, cfg, sources, SyncOptions{
+	result, err := RunSyncWithOptions(r.Context(), s.Cal, token, s.Store, cfg, sources, SyncOptions{
 		SyncDays: syncDays,
 		DryRun:   dryRun,
 	})
@@ -391,7 +393,7 @@ func (s *Server) SearchEvents(w http.ResponseWriter, r *http.Request) {
 	if syncOnly {
 		// Fetch all sync-engine placeholders, then filter by date client-side.
 		// (privateExtendedProperty + timeMin/timeMax don't combine reliably in the API)
-		all, err := ListAllPlaceholders(r.Context(), token, calendarID)
+		all, err := ListAllPlaceholders(r.Context(), s.Cal, token, calendarID)
 		if err != nil {
 			server.RespondError(w, http.StatusBadGateway, "Google Calendar API: "+err.Error())
 			return
@@ -414,7 +416,7 @@ func (s *Server) SearchEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		res, err := ListEvents(r.Context(), token, calendarID, timeMin, timeMax)
+		res, err := s.Cal.ListEvents(r.Context(), token, calendarID, timeMin, timeMax)
 		if err != nil {
 			server.RespondError(w, http.StatusBadGateway, "Google Calendar API: "+err.Error())
 			return
@@ -485,7 +487,7 @@ func (s *Server) BulkDeleteEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deleted, errors := BatchDeleteEvents(r.Context(), token, req.CalendarID, req.EventIDs)
+	deleted, errors := s.Cal.BatchDeleteEvents(r.Context(), token, req.CalendarID, req.EventIDs)
 
 	server.RespondJSON(w, http.StatusOK, map[string]interface{}{
 		"deleted": deleted,
@@ -563,7 +565,7 @@ func (s *Server) NudgeSync(w http.ResponseWriter, r *http.Request) {
 		// Allow zero sources — cleanup phase needs to run
 
 		syncDays := cfg.SyncWindowWeeks * 7
-		if _, err := RunSyncWithDays(r.Context(), token, s.Store, &cfg, sources, syncDays); err != nil {
+		if _, err := RunSyncWithDays(r.Context(), s.Cal, token, s.Store, &cfg, sources, syncDays); err != nil {
 			msg := fmt.Sprintf("user %s: sync failed: %v", cfg.UserID, err)
 			log.Printf("nudge: %s", msg)
 			errs = append(errs, msg)

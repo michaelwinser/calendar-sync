@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -24,6 +25,7 @@ import (
 	appcli "github.com/michaelwinser/appbase/cli"
 
 	"github.com/michaelwinser/calendar-sync/internal/app"
+	"github.com/michaelwinser/calendar-sync/internal/platform/calendar"
 )
 
 var (
@@ -51,7 +53,9 @@ func setup() error {
 		return err
 	}
 
-	appSrv = &app.Server{Store: store, Google: a.Google()}
+	// CALENDAR_API_BASE lets tests point the client at a local fake; empty = real Google.
+	cal := calendar.New(os.Getenv("CALENDAR_API_BASE"))
+	appSrv = &app.Server{Store: store, Google: a.Google(), Cal: cal}
 	appSrv.RegisterRoutes(a.Router())
 
 	// Nudge endpoint — registered outside /api/ to bypass session auth middleware.
