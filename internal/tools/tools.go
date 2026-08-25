@@ -5,7 +5,6 @@ package tools
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -178,10 +177,19 @@ func (m *module) bulkDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deleted, errors := m.cal.BatchDeleteEvents(r.Context(), token, req.CalendarID, req.EventIDs)
+	// Bounded-concurrent, rate-limited individual deletes with a wall-clock budget:
+	// returns partial results instead of blocking open-endedly. The client sends the
+	// selection in chunks and re-queues any Unprocessed IDs.
+	res := m.cal.DeleteEvents(r.Context(), token, req.CalendarID, req.EventIDs,
+		calendar.DeleteEventsOptions{Deadline: 25 * time.Second})
+	unprocessed := res.Unprocessed
+	if unprocessed == nil {
+		unprocessed = []string{} // a list field reads better as [] than null
+	}
 	server.RespondJSON(w, http.StatusOK, map[string]any{
-		"deleted": deleted,
-		"errors":  errors,
-		"message": fmt.Sprintf("Deleted %d events (%d errors)", deleted, errors),
+		"deleted":     res.Deleted,
+		"failed":      res.Failed,
+		"unprocessed": unprocessed,
+		"sampleError": res.SampleError,
 	})
 }
