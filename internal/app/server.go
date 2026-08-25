@@ -51,7 +51,7 @@ func (s *Server) Status(w http.ResponseWriter, r *http.Request) {
 
 // ListCalendars fetches the user's Google Calendar list.
 func (s *Server) ListCalendars(w http.ResponseWriter, r *http.Request) {
-	token, err := platform.AccessToken(r, s.Google)
+	token, err := platform.AccessToken(r)
 	if err != nil {
 		server.RespondError(w, http.StatusForbidden, err.Error())
 		return
@@ -229,7 +229,7 @@ func (s *Server) TriggerSync(w http.ResponseWriter, r *http.Request) {
 	// No check for empty sources — sync must still run with zero sources
 	// so the cleanup phase can delete placeholders from removed calendars.
 
-	token, err := platform.AccessToken(r, s.Google)
+	token, err := platform.AccessToken(r)
 	if err != nil {
 		server.RespondError(w, http.StatusForbidden, err.Error())
 		return
