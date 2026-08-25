@@ -6,13 +6,13 @@ import (
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/michaelwinser/appbase"
 	"github.com/michaelwinser/appbase/auth"
 	"github.com/michaelwinser/appbase/server"
+	"github.com/michaelwinser/calendar-sync/internal/platform"
 	"github.com/michaelwinser/calendar-sync/internal/platform/calendar"
 )
 
@@ -21,36 +21,6 @@ type Server struct {
 	Store  *Store
 	Google *auth.GoogleAuth
 	Cal    *calendar.Client
-}
-
-// getAccessToken returns the OAuth access token, refreshing if expired.
-func getAccessToken(r *http.Request, google *auth.GoogleAuth) (string, error) {
-	token := appbase.AccessToken(r)
-	if token == "" {
-		return "", fmt.Errorf("no Google API access token — re-login to grant Calendar permission")
-	}
-
-	// Attempt refresh if expired
-	expiry := auth.TokenExpiry(r)
-	if !expiry.IsZero() && time.Now().After(expiry) && google != nil {
-		refreshToken := auth.RefreshToken(r)
-		if refreshToken != "" {
-			session := &auth.Session{
-				AccessToken:  token,
-				RefreshToken: refreshToken,
-				TokenExpiry:  expiry,
-			}
-			newToken, err := google.RefreshAccessToken(r.Context(), session)
-			if err != nil {
-				log.Printf("token refresh failed: %v", err)
-				// Return expired token; caller will get 401 from Google
-				return token, nil
-			}
-			return newToken, nil
-		}
-	}
-
-	return token, nil
 }
 
 // registerAPI mounts the app's API routes on r.
@@ -64,8 +34,6 @@ func (s *Server) registerAPI(r chi.Router) {
 	r.Get("/api/sync/logs", s.ListSyncLogs)
 	r.Get("/api/sync/events", s.ListSyncedEvents)
 	r.Get("/api/status", s.Status)
-	r.Get("/api/tools/search-events", s.SearchEvents)
-	r.Post("/api/tools/delete-events", s.BulkDeleteEvents)
 }
 
 // Status returns the authenticated user's status.
@@ -83,7 +51,7 @@ func (s *Server) Status(w http.ResponseWriter, r *http.Request) {
 
 // ListCalendars fetches the user's Google Calendar list.
 func (s *Server) ListCalendars(w http.ResponseWriter, r *http.Request) {
-	token, err := getAccessToken(r, s.Google)
+	token, err := platform.AccessToken(r, s.Google)
 	if err != nil {
 		server.RespondError(w, http.StatusForbidden, err.Error())
 		return
@@ -261,7 +229,7 @@ func (s *Server) TriggerSync(w http.ResponseWriter, r *http.Request) {
 	// No check for empty sources — sync must still run with zero sources
 	// so the cleanup phase can delete placeholders from removed calendars.
 
-	token, err := getAccessToken(r, s.Google)
+	token, err := platform.AccessToken(r, s.Google)
 	if err != nil {
 		server.RespondError(w, http.StatusForbidden, err.Error())
 		return
@@ -333,167 +301,6 @@ func (s *Server) ListSyncedEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	server.RespondJSON(w, http.StatusOK, events)
-}
-
-// searchEventResult is a single event returned by SearchEvents.
-type searchEventResult struct {
-	ID       string `json:"id"`
-	Summary  string `json:"summary"`
-	Start    string `json:"start"`
-	End      string `json:"end"`
-	Location string `json:"location,omitempty"`
-}
-
-// SearchEvents searches for events on a calendar matching filters.
-// Query params: calendarId, timeMin, timeMax, q (title substring)
-func (s *Server) SearchEvents(w http.ResponseWriter, r *http.Request) {
-	userID := appbase.UserID(r)
-	if userID == "" {
-		server.RespondError(w, http.StatusUnauthorized, "not authenticated")
-		return
-	}
-
-	token, err := getAccessToken(r, s.Google)
-	if err != nil {
-		server.RespondError(w, http.StatusForbidden, err.Error())
-		return
-	}
-
-	calendarID := r.URL.Query().Get("calendarId")
-	if calendarID == "" {
-		server.RespondError(w, http.StatusBadRequest, "calendarId is required")
-		return
-	}
-
-	timeMinStr := r.URL.Query().Get("timeMin")
-	timeMaxStr := r.URL.Query().Get("timeMax")
-	query := r.URL.Query().Get("q")
-
-	if timeMinStr == "" || timeMaxStr == "" {
-		server.RespondError(w, http.StatusBadRequest, "timeMin and timeMax are required")
-		return
-	}
-
-	timeMin, err := time.Parse("2006-01-02", timeMinStr)
-	if err != nil {
-		server.RespondError(w, http.StatusBadRequest, "timeMin must be YYYY-MM-DD")
-		return
-	}
-	timeMax, err := time.Parse("2006-01-02", timeMaxStr)
-	if err != nil {
-		server.RespondError(w, http.StatusBadRequest, "timeMax must be YYYY-MM-DD")
-		return
-	}
-	// Make timeMax inclusive of the full day
-	timeMax = timeMax.Add(24 * time.Hour)
-
-	syncOnly := r.URL.Query().Get("syncOnly") == "true"
-
-	var events []GCalEvent
-	if syncOnly {
-		// Fetch all sync-engine placeholders, then filter by date client-side.
-		// (privateExtendedProperty + timeMin/timeMax don't combine reliably in the API)
-		all, err := ListAllPlaceholders(r.Context(), s.Cal, token, calendarID)
-		if err != nil {
-			server.RespondError(w, http.StatusBadGateway, "Google Calendar API: "+err.Error())
-			return
-		}
-		minDate := timeMin.Format("2006-01-02")
-		maxDate := timeMax.Format("2006-01-02")
-		for _, e := range all {
-			// Extract start date for comparison
-			startDate := e.Start.Date
-			if startDate == "" && e.Start.DateTime != "" {
-				if t, err := time.Parse(time.RFC3339, e.Start.DateTime); err == nil {
-					startDate = t.Format("2006-01-02")
-				}
-			}
-			if startDate == "" {
-				continue
-			}
-			if startDate >= minDate && startDate < maxDate {
-				events = append(events, e)
-			}
-		}
-	} else {
-		res, err := s.Cal.ListEvents(r.Context(), token, calendarID, timeMin, timeMax)
-		if err != nil {
-			server.RespondError(w, http.StatusBadGateway, "Google Calendar API: "+err.Error())
-			return
-		}
-		events = res.Events
-	}
-
-	// Filter by title substring (case-insensitive)
-	var results []searchEventResult
-	queryLower := strings.ToLower(query)
-	for _, e := range events {
-		if e.Status == "cancelled" {
-			continue
-		}
-		if query != "" && !strings.Contains(strings.ToLower(e.Summary), queryLower) {
-			continue
-		}
-		start := e.Start.DateTime
-		if start == "" {
-			start = e.Start.Date
-		}
-		end := e.End.DateTime
-		if end == "" {
-			end = e.End.Date
-		}
-		results = append(results, searchEventResult{
-			ID:       e.ID,
-			Summary:  e.Summary,
-			Start:    start,
-			End:      end,
-			Location: e.Location,
-		})
-	}
-
-	if results == nil {
-		results = []searchEventResult{}
-	}
-	server.RespondJSON(w, http.StatusOK, results)
-}
-
-// bulkDeleteRequest is the JSON body for BulkDeleteEvents.
-type bulkDeleteRequest struct {
-	CalendarID string   `json:"calendarId"`
-	EventIDs   []string `json:"eventIds"`
-}
-
-// BulkDeleteEvents deletes multiple events from a calendar.
-func (s *Server) BulkDeleteEvents(w http.ResponseWriter, r *http.Request) {
-	userID := appbase.UserID(r)
-	if userID == "" {
-		server.RespondError(w, http.StatusUnauthorized, "not authenticated")
-		return
-	}
-
-	token, err := getAccessToken(r, s.Google)
-	if err != nil {
-		server.RespondError(w, http.StatusForbidden, err.Error())
-		return
-	}
-
-	var req bulkDeleteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		server.RespondError(w, http.StatusBadRequest, "invalid JSON")
-		return
-	}
-	if req.CalendarID == "" || len(req.EventIDs) == 0 {
-		server.RespondError(w, http.StatusBadRequest, "calendarId and eventIds are required")
-		return
-	}
-
-	deleted, errors := s.Cal.BatchDeleteEvents(r.Context(), token, req.CalendarID, req.EventIDs)
-
-	server.RespondJSON(w, http.StatusOK, map[string]interface{}{
-		"deleted": deleted,
-		"errors":  errors,
-		"message": fmt.Sprintf("Deleted %d events (%d errors)", deleted, errors),
-	})
 }
 
 // NudgeSync triggers sync for all users who are due based on their schedule.

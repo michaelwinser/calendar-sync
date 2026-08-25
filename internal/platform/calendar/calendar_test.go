@@ -22,8 +22,8 @@ func TestIsRetryable(t *testing.T) {
 		{403, "userRateLimitExceeded", true},
 		{403, "quotaExceeded", true},
 		{403, "RESOURCE_EXHAUSTED", true}, // status fallback when errors[] absent
-		{403, "forbidden", false},        // permanent — must fail fast
-		{403, "", false},                 // no reason — treat as permanent
+		{403, "forbidden", false},         // permanent — must fail fast
+		{403, "", false},                  // no reason — treat as permanent
 		{404, "", false},
 		{400, "badRequest", false},
 		{200, "", false},
