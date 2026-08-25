@@ -197,19 +197,52 @@ const toolsPage = `<!DOCTYPE html>
         const btn = document.getElementById('delete-btn');
         const status = document.getElementById('status');
         btn.disabled = true;
-        status.textContent = 'Deleting...';
 
-        const res = await fetch('/api/tools/delete-events', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ calendarId: calId, eventIds: ids })
-        });
-        const data = await res.json();
-        status.textContent = data.message || 'Done';
+        // Delete in sequential chunks so each request stays short (no timeout) and
+        // the user sees progress. Re-queue any unprocessed IDs; stop if two chunks
+        // in a row make no progress (e.g. a read-only calendar).
+        const CHUNK = 75;
+        const total = ids.length;
+        let queue = ids.slice();
+        let deleted = 0, failed = 0, noProgress = 0, aborted = '';
+
+        while (queue.length > 0) {
+            const chunk = queue.splice(0, CHUNK);
+            status.textContent = 'Deleting ' + (deleted + failed) + ' / ' + total + '...';
+            let data;
+            try {
+                const res = await fetch('/api/tools/delete-events', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ calendarId: calId, eventIds: chunk })
+                });
+                data = await res.json();
+                if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+            } catch (e) {
+                queue.unshift(...chunk);            // chunk didn't process — retry it
+                if (++noProgress >= 2) { aborted = e.message; break; }
+                continue;
+            }
+            deleted += data.deleted || 0;
+            failed += data.failed || 0;
+            if (data.unprocessed && data.unprocessed.length) {
+                queue.unshift(...data.unprocessed); // deadline hit server-side — re-queue
+            }
+            if ((data.deleted || 0) > 0) {
+                noProgress = 0;
+            } else if (++noProgress >= 2) {
+                aborted = data.sampleError || 'no events could be deleted';
+                break;
+            }
+        }
+
+        let msg = 'Deleted ' + deleted;
+        if (failed > 0) msg += ', ' + failed + ' failed';
+        if (aborted) msg += ' — stopped: ' + aborted;
+        status.textContent = msg;
         btn.disabled = false;
 
-        // Re-search to update the list
-        setTimeout(searchEvents, 1000);
+        await searchEvents(); // final ground truth from the server
     }
 
     function formatEventTime(start, end) {
