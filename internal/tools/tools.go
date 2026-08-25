@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/michaelwinser/appbase"
-	"github.com/michaelwinser/appbase/auth"
 	"github.com/michaelwinser/appbase/server"
 
 	"github.com/michaelwinser/calendar-sync/internal/app"
@@ -20,13 +19,12 @@ import (
 )
 
 type module struct {
-	cal    *calendar.Client
-	google *auth.GoogleAuth
+	cal *calendar.Client
 }
 
 // RegisterRoutes mounts the Tools API routes.
 func RegisterRoutes(deps platform.Deps) error {
-	m := &module{cal: deps.Cal, google: deps.Google}
+	m := &module{cal: deps.Cal}
 	deps.Router.Get("/api/tools/search-events", m.searchEvents)
 	deps.Router.Post("/api/tools/delete-events", m.bulkDelete)
 	return nil
@@ -53,7 +51,7 @@ func (m *module) searchEvents(w http.ResponseWriter, r *http.Request) {
 		server.RespondError(w, http.StatusUnauthorized, "not authenticated")
 		return
 	}
-	token, err := platform.AccessToken(r, m.google)
+	token, err := platform.AccessToken(r)
 	if err != nil {
 		server.RespondError(w, http.StatusForbidden, err.Error())
 		return
@@ -164,7 +162,7 @@ func (m *module) bulkDelete(w http.ResponseWriter, r *http.Request) {
 		server.RespondError(w, http.StatusUnauthorized, "not authenticated")
 		return
 	}
-	token, err := platform.AccessToken(r, m.google)
+	token, err := platform.AccessToken(r)
 	if err != nil {
 		server.RespondError(w, http.StatusForbidden, err.Error())
 		return
