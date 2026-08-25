@@ -26,6 +26,7 @@ import (
 	"github.com/michaelwinser/calendar-sync/internal/app"
 	"github.com/michaelwinser/calendar-sync/internal/platform"
 	"github.com/michaelwinser/calendar-sync/internal/platform/calendar"
+	"github.com/michaelwinser/calendar-sync/internal/tools"
 )
 
 var (
@@ -63,6 +64,9 @@ func setup() error {
 	if err := app.RegisterRoutes(deps); err != nil {
 		return err
 	}
+	if err := tools.RegisterRoutes(deps); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -72,6 +76,7 @@ func main() {
 	cliApp.SetServeFunc(func() error {
 		// Register each module's authenticated pages, then serve.
 		app.RegisterPages(deps)
+		tools.RegisterPages(deps)
 		return a.Serve()
 	})
 

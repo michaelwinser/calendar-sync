@@ -19,7 +19,7 @@ func RegisterRoutes(deps platform.Deps) error {
 }
 
 // RegisterPages wires the app's authenticated HTML pages. Called at serve.
+// The root catch-all ("/*") is owned here; the Tools page is owned by internal/tools.
 func RegisterPages(deps platform.Deps) {
-	deps.Router.Get("/tools", deps.LoginPage(toolsHandler))
 	deps.Router.Get("/*", deps.LoginPage(homeHandler))
 }

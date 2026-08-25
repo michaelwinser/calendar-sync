@@ -390,7 +390,7 @@ func syncHubToSources(ctx context.Context, cal *calendar.Client, token string, s
 	hubCalID := config.HubCalendarID
 
 	// Fetch ALL hub placeholders as ground truth for what should exist outbound.
-	hubPlaceholders, err := ListAllPlaceholders(ctx, cal, token, hubCalID)
+	hubPlaceholders, err := ListSyncPlaceholders(ctx, cal, token, hubCalID)
 	if err != nil {
 		return fmt.Errorf("fetching hub placeholders: %w", err)
 	}
@@ -448,7 +448,7 @@ func syncOutboundToSource(ctx context.Context, cal *calendar.Client, token strin
 	}
 
 	// Fetch existing placeholders on this target calendar for adoption after DB wipe
-	existingPlaceholders, err := ListAllPlaceholders(ctx, cal, token, targetCalID)
+	existingPlaceholders, err := ListSyncPlaceholders(ctx, cal, token, targetCalID)
 	if err != nil {
 		// If we can't list (e.g. read-only), skip this calendar
 		if isPermissionError(err) {
@@ -662,7 +662,7 @@ func cleanupPastEvents(ctx context.Context, cal *calendar.Client, token string, 
 
 	// For each target calendar, find our placeholders and check end dates
 	for calID := range targetCalIDs {
-		placeholders, err := ListAllPlaceholders(ctx, cal, token, calID)
+		placeholders, err := ListSyncPlaceholders(ctx, cal, token, calID)
 		if err != nil {
 			log.Printf("past cleanup: failed to list placeholders on %s: %v", calID, err)
 			continue

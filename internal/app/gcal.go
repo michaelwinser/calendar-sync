@@ -42,8 +42,11 @@ func ListPlaceholders(ctx context.Context, cal *calendar.Client, token, calendar
 	})
 }
 
-// ListAllPlaceholders fetches all placeholder events created by this app on a calendar.
-func ListAllPlaceholders(ctx context.Context, cal *calendar.Client, token, calendarID string) ([]GCalEvent, error) {
+// ListSyncPlaceholders fetches all placeholder events created by this app on a
+// calendar. Exported as sync's cross-module query — the tools module uses it for its
+// sync-only filter rather than duplicating the placeholder marker. (Moves to
+// internal/sync in M8.)
+func ListSyncPlaceholders(ctx context.Context, cal *calendar.Client, token, calendarID string) ([]GCalEvent, error) {
 	return cal.ListEventsByProperty(ctx, token, calendarID, calendar.EventQuery{
 		PrivateProps: map[string]string{"calendarSyncMarker": "v1"},
 		SingleEvents: true,

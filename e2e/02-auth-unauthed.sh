@@ -1,5 +1,6 @@
 #!/bin/sh
 # UC-0002, UC-0004: Unauthenticated user sees login page. Auth status returns loggedIn: false.
+# UC-0074: the Tools module is mounted (its API exists and rejects unauthenticated requests).
 #
 # Starts the server, checks auth status without a session, verifies login page is served.
 set -e
@@ -74,6 +75,22 @@ else
     printf "${RED}UC-0002 FAILED: expected login page content${NC}\n\n"
     FAILURES=$((FAILURES + 1))
 fi
+
+# Test 3 (UC-0074): Tools module is mounted — its API endpoints exist and reject
+# unauthenticated requests (401/403) rather than 404. Guards against the module not
+# being wired into main.
+for ep in "GET /api/tools/search-events" "POST /api/tools/delete-events"; do
+    method=${ep%% *}
+    path=${ep#* }
+    printf "${DIM}%s (no session)${NC}\n" "$ep"
+    CODE=$(curl -s -o /dev/null -w '%{http_code}' -X "$method" "http://localhost:$PORT$path")
+    if [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
+        printf "${GREEN}UC-0074 PASSED: %s mounted, rejects unauthenticated (%s)${NC}\n\n" "$path" "$CODE"
+    else
+        printf "${RED}UC-0074 FAILED: %s returned %s (expected 401/403; route missing?)${NC}\n\n" "$path" "$CODE"
+        FAILURES=$((FAILURES + 1))
+    fi
+done
 
 # Results
 if [ "$FAILURES" -gt 0 ]; then
