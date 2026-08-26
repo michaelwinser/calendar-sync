@@ -24,6 +24,7 @@ import (
 	appcli "github.com/michaelwinser/appbase/cli"
 
 	"github.com/michaelwinser/calendar-sync/internal/app"
+	"github.com/michaelwinser/calendar-sync/internal/heatmap"
 	"github.com/michaelwinser/calendar-sync/internal/platform"
 	"github.com/michaelwinser/calendar-sync/internal/platform/calendar"
 	"github.com/michaelwinser/calendar-sync/internal/tools"
@@ -67,6 +68,9 @@ func setup() error {
 	if err := tools.RegisterRoutes(deps); err != nil {
 		return err
 	}
+	if err := heatmap.RegisterRoutes(deps); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -77,6 +81,7 @@ func main() {
 		// Register each module's authenticated pages, then serve.
 		app.RegisterPages(deps)
 		tools.RegisterPages(deps)
+		heatmap.RegisterPages(deps)
 		return a.Serve()
 	})
 

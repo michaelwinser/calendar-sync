@@ -1,6 +1,7 @@
 #!/bin/sh
 # UC-0002, UC-0004: Unauthenticated user sees login page. Auth status returns loggedIn: false.
 # UC-0074: the Tools module is mounted (its API exists and rejects unauthenticated requests).
+# UC-0084: the Heatmap module is mounted (its API exists and rejects unauthenticated requests).
 #
 # Starts the server, checks auth status without a session, verifies login page is served.
 set -e
@@ -91,6 +92,16 @@ for ep in "GET /api/tools/search-events" "POST /api/tools/delete-events"; do
         FAILURES=$((FAILURES + 1))
     fi
 done
+
+# Test 4 (UC-0084): Heatmap module mounted — its API rejects unauthenticated requests.
+printf "${DIM}GET /api/heatmap/events (no session)${NC}\n"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$PORT/api/heatmap/events?calendarId=x&start=2026-01-01&end=2026-02-01&tz=UTC")
+if [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
+    printf "${GREEN}UC-0084 PASSED: heatmap API mounted, rejects unauthenticated (%s)${NC}\n\n" "$CODE"
+else
+    printf "${RED}UC-0084 FAILED: /api/heatmap/events returned %s (expected 401/403; route missing?)${NC}\n\n" "$CODE"
+    FAILURES=$((FAILURES + 1))
+fi
 
 # Results
 if [ "$FAILURES" -gt 0 ]; then
