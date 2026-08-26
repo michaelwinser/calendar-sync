@@ -98,6 +98,18 @@ The Tools feature (bulk search/delete) predates formal use-case coverage; M6 cap
 | UC-0073 | Accurate bulk-delete result reporting | When some deletes fail, the reported deleted/failed counts are accurate (no miscount from response parsing). |
 | UC-0074 | Tool served from its own module | The Tools feature is served from an isolated module with its own routes (`/api/tools/...`) and owns no shared sync data; extracting it preserves existing behavior. |
 
+### M7 — Occupancy Heatmap
+
+A read-only utility (own module) that visualizes how often each 30-minute slot of the week is busy across a date range. Ports the standalone Apps Script prototype into the app so it shares auth, deployment, and the calendar client.
+
+| ID | Use Case | Description |
+|----|----------|-------------|
+| UC-0080 | View occupancy heatmap | An authenticated user selects one or more calendars and a date range (default today → 6 months) and sees a weekday × 30-minute-slot grid coloured by how often each slot is busy. |
+| UC-0081 | Busy definition | A slot's occupancy counts timed, non-declined, non-transparent, `default`-type events; all-day, cancelled, free/transparent, and non-default event types are excluded. Occupancy for a (weekday, slot) is the fraction of that weekday in the range where the slot had a meeting. |
+| UC-0082 | Live client-side filters | Excluding events by title substring and restricting to recurring meetings re-render instantly from already-fetched data, without re-querying Google. |
+| UC-0083 | Slot details | Clicking a cell shows the meetings occupying that (weekday, slot), grouped by title with counts. |
+| UC-0084 | Heatmap served from its own module | The heatmap is served from an isolated module — its API under `/api/heatmap/...` and its `/heatmap` page — owning no shared data; unauthenticated requests are rejected. |
+
 ## Future Considerations
 
 The following are not in the current roadmap but are anticipated extensions:
@@ -134,4 +146,5 @@ Track implementation status here. E2e tests for all "done" use cases must pass i
 | M3 | UC-0020 – UC-0034 | done (UC-0020–UC-0028, UC-0031–UC-0034 manual only) |
 | M4 | UC-0040 – UC-0049 | done (UC-0040–UC-0049 manual only) |
 | M5 | UC-0050 – UC-0060 | implemented (manual only); e2e status audit pending |
-| M6 | UC-0070 – UC-0074 | not started |
+| M6 | UC-0070 – UC-0074 | done (UC-0070–0073 unit-tested; browser/live-Google validation manual) |
+| M7 | UC-0080 – UC-0084 | not started |
