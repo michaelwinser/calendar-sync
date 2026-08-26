@@ -12,6 +12,10 @@ data/
 # Docker sandbox config
 .docker/
 
+# Standalone Apps Script prototype (not part of the Go app; superseded by the
+# internal/heatmap module in M7).
+heatmap.gs
+
 # OS
 .DS_Store
 
