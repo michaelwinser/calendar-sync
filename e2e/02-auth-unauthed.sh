@@ -2,6 +2,7 @@
 # UC-0002, UC-0004: Unauthenticated user sees login page. Auth status returns loggedIn: false.
 # UC-0074: the Tools module is mounted (its API exists and rejects unauthenticated requests).
 # UC-0084: the Heatmap module is mounted (its API exists and rejects unauthenticated requests).
+# UC-0010: the shared calendars module is mounted (/api/calendars rejects unauthenticated requests).
 #
 # Starts the server, checks auth status without a session, verifies login page is served.
 set -e
@@ -100,6 +101,18 @@ if [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
     printf "${GREEN}UC-0084 PASSED: heatmap API mounted, rejects unauthenticated (%s)${NC}\n\n" "$CODE"
 else
     printf "${RED}UC-0084 FAILED: /api/heatmap/events returned %s (expected 401/403; route missing?)${NC}\n\n" "$CODE"
+    FAILURES=$((FAILURES + 1))
+fi
+
+# Test 5 (UC-0010): the shared calendars module is mounted — /api/calendars exists
+# and rejects unauthenticated requests. Guards against the route (moved out of the
+# sync module into internal/calendars) silently unmounting.
+printf "${DIM}GET /api/calendars (no session)${NC}\n"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$PORT/api/calendars")
+if [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
+    printf "${GREEN}UC-0010 PASSED: calendars API mounted, rejects unauthenticated (%s)${NC}\n\n" "$CODE"
+else
+    printf "${RED}UC-0010 FAILED: /api/calendars returned %s (expected 401/403; route missing?)${NC}\n\n" "$CODE"
     FAILURES=$((FAILURES + 1))
 fi
 

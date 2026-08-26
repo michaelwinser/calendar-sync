@@ -23,6 +23,7 @@ import (
 	"github.com/michaelwinser/appbase"
 	appcli "github.com/michaelwinser/appbase/cli"
 
+	"github.com/michaelwinser/calendar-sync/internal/calendars"
 	"github.com/michaelwinser/calendar-sync/internal/heatmap"
 	"github.com/michaelwinser/calendar-sync/internal/platform"
 	"github.com/michaelwinser/calendar-sync/internal/platform/calendar"
@@ -62,6 +63,9 @@ func setup() error {
 
 	// Mount modules. Each registers its own routes (API under /api/, plus any
 	// non-/api endpoints such as the nudge, which does its own auth).
+	if err := calendars.RegisterRoutes(deps); err != nil {
+		return err
+	}
 	if err := sync.RegisterRoutes(deps); err != nil {
 		return err
 	}
