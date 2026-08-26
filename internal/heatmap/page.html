@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Calendar Heat Map</title>
+<style>
+  body { font: 14px/1.4 -apple-system, Segoe UI, Roboto, sans-serif; margin: 20px; color: #222; }
+  h1 { font-size: 18px; margin: 0 0 16px; }
+  h1 a { font-size: 13px; font-weight: 400; margin-left: 12px; color: #1a73e8; text-decoration: none; }
+  .controls { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; margin-bottom: 12px; }
+  .field label.hdr { display: block; font-weight: 600; margin-bottom: 4px; }
+  .cals { max-height: 180px; overflow-y: auto; border: 1px solid #ddd; border-radius: 6px; padding: 8px 10px; min-width: 180px; }
+  .cal { display: block; font-weight: 400; white-space: nowrap; }
+  .opt { display: block; font-weight: 400; white-space: nowrap; padding-top: 6px; }
+  textarea { font: inherit; width: 210px; resize: vertical; border: 1px solid #ddd; border-radius: 6px; padding: 6px 8px; }
+  button { font-size: 14px; padding: 8px 18px; border: 0; border-radius: 6px; background: #1a73e8; color: #fff; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  .hint { color: #666; font-size: 12px; margin: 0 0 6px; }
+  #status { margin: 0 0 8px; color: #666; font-size: 13px; min-height: 18px; }
+  #status.err { color: #c62828; }
+  #warnings { color: #b26a00; font-size: 13px; margin: 0 0 12px; }
+  .layout { display: flex; gap: 28px; align-items: flex-start; }
+  #out { overflow-x: auto; }
+  table.heat { border-collapse: separate; border-spacing: 3px; }
+  table.heat th, table.heat td { border: 1px solid #e6e6e6; }
+  table.heat th { background: #fafafa; font-weight: 600; padding: 6px 14px; text-align: center; }
+  table.heat th.time { text-align: right; font-weight: 400; color: #666; white-space: nowrap; padding: 6px 14px; }
+  table.heat th .n { font-weight: 400; font-size: 11px; color: #999; }
+  table.heat td { width: 80px; height: 36px; text-align: center; font-size: 12px; border-radius: 4px; }
+  table.heat td.cell { cursor: pointer; }
+  table.heat td.cell.sel { outline: 2px solid #1a73e8; outline-offset: -2px; }
+  #details { min-width: 240px; max-width: 340px; }
+  #details h2 { font-size: 15px; margin: 0 0 2px; }
+  #details .sub { color: #666; font-size: 12px; margin: 0 0 8px; }
+  .dlist { list-style: none; margin: 0; padding: 0; }
+  .dlist li { padding: 6px 0; border-top: 1px solid #eee; }
+  .dlist .cnt { display: inline-block; min-width: 22px; font-weight: 600; color: #1a73e8; }
+  .dlist .dates { color: #999; font-size: 11px; margin-top: 2px; word-break: break-word; }
+  .legend { margin-top: 12px; font-size: 12px; color: #666; }
+  .swatch { display: inline-block; width: 14px; height: 14px; vertical-align: middle; border: 1px solid #ccc; margin: 0 2px 0 10px; }
+</style>
+</head>
+<body>
+  <h1>Calendar Heat Map <a href="/">&larr; Home</a></h1>
+  <div class="controls">
+    <div class="field">
+      <label class="hdr">Start</label>
+      <input type="date" id="start">
+    </div>
+    <div class="field">
+      <label class="hdr">End</label>
+      <input type="date" id="end">
+    </div>
+    <div class="field">
+      <label class="hdr">Calendars</label>
+      <div class="cals" id="cals">Loading…</div>
+    </div>
+    <div class="field">
+      <label class="hdr">Exclude titles containing</label>
+      <textarea id="exclude" rows="3" placeholder="one substring per line" oninput="onView()">🔄</textarea>
+    </div>
+    <div class="field">
+      <label class="hdr">Filter</label>
+      <label class="opt"><input type="checkbox" id="recurring" onchange="reslice()"> Recurring meetings only</label>
+    </div>
+    <div class="field">
+      <label class="hdr">&nbsp;</label>
+      <button id="go" onclick="loadData()">Load events</button>
+    </div>
+  </div>
+  <p class="hint">Editing the exclude list or the recurring toggle re-renders instantly. Changing dates or calendars needs <b>Load events</b>. Click a cell for its full meeting list.</p>
+  <div id="status"></div>
+  <div id="warnings"></div>
+  <div class="layout">
+    <div id="out"></div>
+    <div id="details"></div>
+  </div>
+
+<script>
+  // ----- View config (client-side; change freely) -----
+  var WORK_START_HOUR = 8, WORK_END_HOUR = 20, SLOT_MINUTES = 30;
+  var TOOLTIP_TITLES = 3, AD_HOC_THRESHOLD = 2;
+  var DAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
+  var DAY_LABELS = { 0: 'Sun', 1: 'Mon', 2: 'Tue', 3: 'Wed', 4: 'Thu', 5: 'Fri', 6: 'Sat' };
+  var SLOTS_PER_DAY = (WORK_END_HOUR - WORK_START_HOUR) * 60 / SLOT_MINUTES;
+  var TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  var DATA = null;   // { segments, weekdayTotals, warnings } from the server
+  var AGG = null;    // last aggregation, for the details panel
+  var SEL = null;    // selected cell key 'w-slot'
+  var viewTimer = null;
+
+  // ----- Calendar list (fetched from the shared /api/calendars) -----
+  function loadCalendars() {
+    fetch('/api/calendars')
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function (cals) {
+        cals.sort(function (a, b) {
+          if (!!a.primary !== !!b.primary) return a.primary ? -1 : 1;
+          return (a.name || '').localeCompare(b.name || '');
+        });
+        document.getElementById('cals').innerHTML = cals.map(function (c) {
+          var checked = c.primary ? 'checked' : '';
+          return '<label class="cal"><input type="checkbox" name="cal" value="' +
+            escapeHtml(c.id) + '" ' + checked + '> ' + escapeHtml(c.name || c.id) + '</label>';
+        }).join('') || '<em>No calendars</em>';
+      })
+      .catch(function (e) { document.getElementById('cals').textContent = 'Failed to load calendars: ' + e.message; });
+  }
+
+  // ----- Data load (server round-trip) -----
+  function loadData() {
+    var start = document.getElementById('start').value;
+    var end = document.getElementById('end').value;
+    var ids = Array.prototype.slice
+      .call(document.querySelectorAll('input[name=cal]:checked'))
+      .map(function (el) { return el.value; });
+    if (!ids.length) { status('Select at least one calendar.', true); return; }
+    if (!start || !end || start >= end) { status('Pick a valid date range.', true); return; }
+
+    var btn = document.getElementById('go');
+    btn.disabled = true;
+    status('Loading events…', false);
+
+    var params = new URLSearchParams();
+    params.set('start', start);
+    params.set('end', end);
+    params.set('tz', TZ);
+    ids.forEach(function (id) { params.append('calendarId', id); });
+
+    fetch('/api/heatmap/events?' + params.toString())
+      .then(function (r) { return r.json().then(function (body) { return { ok: r.ok, body: body }; }); })
+      .then(function (res) {
+        btn.disabled = false;
+        if (!res.ok) { status((res.body && res.body.error) || 'Failed to load events.', true); return; }
+        DATA = res.body;
+        status(DATA.segments.length + ' event-segments loaded.', false);
+        showWarnings(DATA.warnings);
+        reslice();
+      })
+      .catch(function (e) { status(e.message, true); btn.disabled = false; });
+  }
+
+  function status(msg, isErr) {
+    var el = document.getElementById('status');
+    el.textContent = msg;
+    el.className = isErr ? 'err' : '';
+  }
+
+  function showWarnings(warnings) {
+    var el = document.getElementById('warnings');
+    if (!warnings || !warnings.length) { el.innerHTML = ''; return; }
+    el.innerHTML = warnings.map(function (w) {
+      return '⚠ ' + (w.calendarId ? escapeHtml(w.calendarId) + ': ' : '') + escapeHtml(w.error);
+    }).join('<br>');
+  }
+
+  // Debounced re-render for live view controls (e.g. typing in the exclude box).
+  function onView() { clearTimeout(viewTimer); viewTimer = setTimeout(reslice, 200); }
+
+  // ----- Aggregate + render (client-side, no network) -----
+  function reslice() {
+    if (!DATA) return;
+    var recurringOnly = document.getElementById('recurring').checked;
+    var excludes = document.getElementById('exclude').value
+      .split(/\r?\n/).map(function (s) { return s.trim().toLowerCase(); })
+      .filter(function (s) { return s.length; });
+
+    var busy = {};        // 'date#slot' -> weekday  (occupancy, deduped once/day)
+    var titleTally = {};  // w -> slot -> normKey -> { count, displays }
+    var occ = {};         // w -> slot -> [ { t, key, d } ]  (every occurrence, for drill-down)
+    for (var w = 0; w < 7; w++) {
+      titleTally[w] = {}; occ[w] = {};
+      for (var sl = 0; sl < SLOTS_PER_DAY; sl++) { titleTally[w][sl] = {}; occ[w][sl] = []; }
+    }
+
+    var segs = DATA.segments;
+    for (var i = 0; i < segs.length; i++) {
+      var seg = segs[i];
+      if (recurringOnly && !seg.r) continue;
+      if (isExcluded(seg.t || '', excludes)) continue;
+      var display = cleanTitle(seg.t || '') || '(no title)';
+      var normKey = display.toLowerCase();
+      for (var slot = 0; slot < SLOTS_PER_DAY; slot++) {
+        var slotStart = WORK_START_HOUR * 60 + slot * SLOT_MINUTES;
+        var slotEnd = slotStart + SLOT_MINUTES;
+        if (seg.s < slotEnd && seg.e > slotStart) {
+          busy[seg.d + '#' + slot] = seg.w;
+          var b = titleTally[seg.w][slot];
+          var entry = b[normKey];
+          if (!entry) { entry = { count: 0, displays: {} }; b[normKey] = entry; }
+          entry.count++;
+          entry.displays[display] = (entry.displays[display] || 0) + 1;
+          occ[seg.w][slot].push({ t: display, key: normKey, d: seg.d });
+        }
+      }
+    }
+
+    var counts = {};
+    for (var w2 = 0; w2 < 7; w2++) counts[w2] = new Array(SLOTS_PER_DAY).fill(0);
+    Object.keys(busy).forEach(function (k) { counts[busy[k]][parseInt(k.split('#')[1], 10)]++; });
+
+    AGG = { counts: counts, titleTally: titleTally, occ: occ, weekdayTotals: DATA.weekdayTotals };
+    render();
+  }
+
+  function render() {
+    var counts = AGG.counts, titleTally = AGG.titleTally, wt = AGG.weekdayTotals;
+    var html = ['<table class="heat">'];
+    html.push('<tr><th class="corner">Time</th>');
+    DAY_ORDER.forEach(function (wd) {
+      html.push('<th>' + DAY_LABELS[wd] + '<div class="n">' + wt[wd] + ' days</div></th>');
+    });
+    html.push('</tr>');
+
+    for (var slot = 0; slot < SLOTS_PER_DAY; slot++) {
+      html.push('<tr><th class="time">' + slotLabel(slot) + '</th>');
+      DAY_ORDER.forEach(function (wd) {
+        var denom = wt[wd];
+        if (!denom) { html.push('<td class="empty"></td>'); return; }
+        var c = counts[wd][slot];
+        var pct = c / denom;
+        var fg = pct >= 0.55 ? '#fff' : '#333';
+        var label = pct > 0 ? Math.round(pct * 100) + '%' : '';
+        var tip = c + '/' + denom + ' ' + DAY_LABELS[wd] + 's busy at ' + slotLabel(slot);
+        var lines = tooltipLines(titleTally[wd][slot]);
+        if (lines.length) tip += '&#10;' + lines.join('&#10;');
+        var cls = 'cell' + (SEL === wd + '-' + slot ? ' sel' : '');
+        html.push('<td class="' + cls + '" style="background:' + heatColor(pct) + ';color:' + fg +
+          '" title="' + tip + '" onclick="showDetails(' + wd + ',' + slot + ')">' + label + '</td>');
+      });
+      html.push('</tr>');
+    }
+    html.push('</table>');
+    html.push(legend());
+    document.getElementById('out').innerHTML = html.join('');
+  }
+
+  // ----- Details panel: every meeting in the clicked slot -----
+  function showDetails(w, slot) {
+    SEL = w + '-' + slot;
+    render();
+    var list = AGG.occ[w][slot];
+    var panel = document.getElementById('details');
+    var header = '<h2>' + DAY_LABELS[w] + ' ' + slotLabel(slot) + '</h2>';
+    if (!list.length) { panel.innerHTML = header + '<p class="sub">No meetings in this slot.</p>'; return; }
+
+    var groups = {};
+    list.forEach(function (o) {
+      var g = groups[o.key];
+      if (!g) { g = { display: o.t, dates: [] }; groups[o.key] = g; }
+      g.dates.push(o.d);
+    });
+    var arr = Object.keys(groups).map(function (k) { return groups[k]; })
+      .sort(function (a, b) { return b.dates.length - a.dates.length; });
+
+    var rows = arr.map(function (g) {
+      g.dates.sort();
+      return '<li><span class="cnt">' + g.dates.length + '</span> ' + escapeHtml(g.display) +
+        '<div class="dates">' + escapeHtml(g.dates.join(', ')) + '</div></li>';
+    }).join('');
+    panel.innerHTML = header + '<p class="sub">' + arr.length + ' distinct · ' + list.length + ' total</p>' +
+      '<ul class="dlist">' + rows + '</ul>';
+  }
+
+  // ----- Helpers -----
+  function isExcluded(raw, excludes) {
+    var t = raw.toLowerCase();
+    for (var i = 0; i < excludes.length; i++) if (t.indexOf(excludes[i]) !== -1) return true;
+    return false;
+  }
+
+  function cleanTitle(s) {
+    return String(s || '')
+      .replace(/[\u{1F1E6}-\u{1F1FF}]/gu, '')
+      .replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}\u{1F3FB}-\u{1F3FF}]/gu, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function mostCommon(counts) {
+    var best = null, bestN = -1;
+    Object.keys(counts).forEach(function (k) { if (counts[k] > bestN) { bestN = counts[k]; best = k; } });
+    return best;
+  }
+
+  function tooltipLines(bucket) {
+    var entries = Object.keys(bucket)
+      .map(function (k) { return { count: bucket[k].count, display: mostCommon(bucket[k].displays) }; })
+      .sort(function (a, b) { return b.count - a.count; });
+    var repeated = entries.filter(function (e) { return e.count >= AD_HOC_THRESHOLD; });
+    var adHoc = entries.reduce(function (n, e) { return e.count < AD_HOC_THRESHOLD ? n + e.count : n; }, 0);
+
+    var lines = [], shown = repeated.slice(0, TOOLTIP_TITLES);
+    shown.forEach(function (e) { lines.push(escapeHtml(e.display) + ' (' + e.count + ')'); });
+    if (repeated.length > shown.length) lines.push('+ ' + (repeated.length - shown.length) + ' more recurring');
+    if (adHoc > 0) lines.push(adHoc + ' ad hoc meeting' + (adHoc === 1 ? '' : 's'));
+    return lines;
+  }
+
+  function heatColor(pct) {
+    pct = Math.max(0, Math.min(1, pct));
+    var r = Math.round(255 + (198 - 255) * pct);
+    var g = Math.round(255 + (40 - 255) * pct);
+    var b = Math.round(255 + (40 - 255) * pct);
+    return 'rgb(' + r + ',' + g + ',' + b + ')';
+  }
+
+  function legend() {
+    var out = 'Busy: ';
+    for (var p = 0; p <= 1.0001; p += 0.25) {
+      out += '<span class="swatch" style="background:' + heatColor(p) + '"></span>' + Math.round(p * 100) + '%';
+    }
+    return '<div class="legend">' + out + '</div>';
+  }
+
+  function slotLabel(slot) {
+    var minutes = WORK_START_HOUR * 60 + slot * SLOT_MINUTES;
+    var h = Math.floor(minutes / 60), m = minutes % 60;
+    return h + ':' + (m < 10 ? '0' + m : m);
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function fmtDate(d) {
+    var m = ('0' + (d.getMonth() + 1)).slice(-2), day = ('0' + d.getDate()).slice(-2);
+    return d.getFullYear() + '-' + m + '-' + day;
+  }
+
+  // ----- Init: trailing 6-month default (past occupancy is what the grid measures) -----
+  (function init() {
+    var today = new Date();
+    var start = new Date(); start.setMonth(start.getMonth() - 6);
+    document.getElementById('end').value = fmtDate(today);
+    document.getElementById('start').value = fmtDate(start);
+    loadCalendars();
+  })();
+</script>
+</body>
+</html>

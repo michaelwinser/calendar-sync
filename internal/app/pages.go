@@ -151,6 +151,7 @@ const homePage = `<!DOCTYPE html>
     <div>
         <button onclick="signOut()">Sign out</button>
         <a href="/tools" style="margin-left:1rem;font-size:0.9rem">Tools</a>
+        <a href="/heatmap" style="margin-left:1rem;font-size:0.9rem">Heatmap</a>
         <span id="status"></span>
     </div>
 

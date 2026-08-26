@@ -180,6 +180,14 @@ func (c *Client) ListCalendars(ctx context.Context, token string) ([]Calendar, e
 // ListEvents fetches events from a calendar within the given time window, plus a
 // sync token for future incremental fetches.
 func (c *Client) ListEvents(ctx context.Context, token, calendarID string, timeMin, timeMax time.Time) (*ListEventsResult, error) {
+	return c.ListEventsFields(ctx, token, calendarID, timeMin, timeMax, "")
+}
+
+// ListEventsFields is ListEvents with an optional Google partial-response field mask
+// (e.g. "items(summary,start,end),nextPageToken") to shrink the payload. A mask must
+// include nextPageToken for paging; omitting nextSyncToken yields an empty SyncToken —
+// fine for a one-shot read, but sync's incremental fetch must never use such a mask.
+func (c *Client) ListEventsFields(ctx context.Context, token, calendarID string, timeMin, timeMax time.Time, fields string) (*ListEventsResult, error) {
 	var result ListEventsResult
 	pageToken := ""
 	for {
@@ -189,6 +197,9 @@ func (c *Client) ListEvents(ctx context.Context, token, calendarID string, timeM
 		params.Set("maxResults", "2500")
 		params.Set("timeMin", timeMin.Format(time.RFC3339))
 		params.Set("timeMax", timeMax.Format(time.RFC3339))
+		if fields != "" {
+			params.Set("fields", fields)
+		}
 		if pageToken != "" {
 			params.Set("pageToken", pageToken)
 		}
