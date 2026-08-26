@@ -1,4 +1,4 @@
-package app
+package sync
 
 import (
 	"log"
@@ -65,18 +65,18 @@ type SyncedEvent struct {
 
 // SyncLog records the result of a sync pass.
 type SyncLog struct {
-	ID          string `json:"id"          store:"id,pk"`
-	UserID      string `json:"userId"      store:"user_id,index"`
-	StartedAt   string `json:"startedAt"   store:"started_at"`
-	CompletedAt string `json:"completedAt" store:"completed_at"`
-	Created     int    `json:"created"     store:"created"`
-	Updated     int    `json:"updated"     store:"updated"`
-	Deleted     int    `json:"deleted"     store:"deleted"`
-	Errors      int    `json:"errors"      store:"errors"`
-	Status      string `json:"status"      store:"status"`
-	ErrorMsg    string `json:"errorMsg"    store:"error_msg"`
+	ID           string `json:"id"          store:"id,pk"`
+	UserID       string `json:"userId"      store:"user_id,index"`
+	StartedAt    string `json:"startedAt"   store:"started_at"`
+	CompletedAt  string `json:"completedAt" store:"completed_at"`
+	Created      int    `json:"created"     store:"created"`
+	Updated      int    `json:"updated"     store:"updated"`
+	Deleted      int    `json:"deleted"     store:"deleted"`
+	Errors       int    `json:"errors"      store:"errors"`
+	Status       string `json:"status"      store:"status"`
+	ErrorMsg     string `json:"errorMsg"    store:"error_msg"`
 	ErrorDetails string `json:"errorDetails" store:"error_details"` // JSON: []string of error messages
-	Details     string `json:"details"     store:"details"` // JSON: map[calendarName]{created,updated,deleted}
+	Details      string `json:"details"     store:"details"`        // JSON: map[calendarName]{created,updated,deleted}
 }
 
 // Store provides access to all collections.

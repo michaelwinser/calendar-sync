@@ -28,7 +28,7 @@ import (
 //   - Pages register via LoginPage, which gates them behind login.
 //   - A module owns its own store collections (built from DB) under a module prefix.
 //   - The root catch-all page ("/*") is owned by exactly one module (currently
-//     internal/app) — chi panics on a duplicate wildcard at the same level.
+//     internal/sync) — chi panics on a duplicate wildcard at the same level.
 type Deps struct {
 	Router    chi.Router                              // register API routes and pages here
 	LoginPage func(http.HandlerFunc) http.HandlerFunc // wrap a page handler with the login gate

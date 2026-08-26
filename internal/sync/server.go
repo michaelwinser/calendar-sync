@@ -1,4 +1,4 @@
-package app
+package sync
 
 import (
 	"encoding/json"
@@ -23,7 +23,7 @@ type Server struct {
 	Cal    *calendar.Client
 }
 
-// registerAPI mounts the app's API routes on r.
+// registerAPI mounts the sync module's API routes on r.
 func (s *Server) registerAPI(r chi.Router) {
 	r.Get("/api/calendars", s.ListCalendars)
 	r.Get("/api/config", s.GetConfig)

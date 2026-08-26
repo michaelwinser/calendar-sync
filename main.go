@@ -23,10 +23,10 @@ import (
 	"github.com/michaelwinser/appbase"
 	appcli "github.com/michaelwinser/appbase/cli"
 
-	"github.com/michaelwinser/calendar-sync/internal/app"
 	"github.com/michaelwinser/calendar-sync/internal/heatmap"
 	"github.com/michaelwinser/calendar-sync/internal/platform"
 	"github.com/michaelwinser/calendar-sync/internal/platform/calendar"
+	"github.com/michaelwinser/calendar-sync/internal/sync"
 	"github.com/michaelwinser/calendar-sync/internal/tools"
 )
 
@@ -62,7 +62,7 @@ func setup() error {
 
 	// Mount modules. Each registers its own routes (API under /api/, plus any
 	// non-/api endpoints such as the nudge, which does its own auth).
-	if err := app.RegisterRoutes(deps); err != nil {
+	if err := sync.RegisterRoutes(deps); err != nil {
 		return err
 	}
 	if err := tools.RegisterRoutes(deps); err != nil {
@@ -79,7 +79,7 @@ func main() {
 
 	cliApp.SetServeFunc(func() error {
 		// Register each module's authenticated pages, then serve.
-		app.RegisterPages(deps)
+		sync.RegisterPages(deps)
 		tools.RegisterPages(deps)
 		heatmap.RegisterPages(deps)
 		return a.Serve()
@@ -111,7 +111,7 @@ func main() {
 			}
 			defer resp.Body.Close()
 
-			var result app.SyncResult
+			var result sync.SyncResult
 			if err := decodeJSON(resp, &result); err != nil {
 				return err
 			}
