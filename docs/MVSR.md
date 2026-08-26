@@ -82,4 +82,4 @@ Beyond sync, the app has grown a second useful capability — a **Tools** page f
 | **M5** | Polish and enhancements as determined during development. |
 | **M6** | Modular foundation: extract the Tools (bulk search/delete) into its own module behind a shared calendar/bulk-ops layer, and fix bulk delete for large selections (client-chunked progress, bounded concurrency). |
 | **M7** | Heatmap module: bring the weekly-occupancy heatmap into the app (read-only), retiring the standalone Apps Script version. |
-| **M8** | Modularize sync into its own module and migrate its data to module-owned, prefixed collections; retire the shared all-tables store. |
+| **M8** | Modularize sync into `internal/sync`, migrate its data to module-owned, prefixed, point-lookup-keyed collections, and use that key to make sync two-tier (cheap incremental fast pass + periodic full reconciliation) — the real fix for the Firestore read cost. Highest-risk milestone (live data); staged. |
