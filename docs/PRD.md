@@ -110,6 +110,18 @@ A read-only utility (own module) that visualizes how often each 30-minute slot o
 | UC-0083 | Slot details | Clicking a cell shows the meetings occupying that (weekday, slot), grouped by title with counts. |
 | UC-0084 | Heatmap served from its own module | The heatmap is served from an isolated module — its API under `/api/heatmap/...` and its `/heatmap` page — owning no shared data; unauthenticated requests are rejected. |
 
+### M8 — Sync Modularization + Two-Tier Incremental Sync
+
+Move sync into its own module, re-key + namespace its data, and split sync into a cheap incremental fast pass plus a periodic full reconciliation — the real fix for the Firestore read cost. Highest-risk milestone (live data).
+
+| ID | Use Case | Description |
+|----|----------|-------------|
+| UC-0090 | Fast pass propagates a single change | A source event added/changed/deleted between full passes is reflected on the hub and other calendars by the fast pass, reading only that event's own mapping records (no full-collection scan). |
+| UC-0091 | Full pass repairs drift | A daily full pass restores anything the fast path can't see: a manually deleted/edited placeholder, an orphaned mapping, an out-of-window/declined event's placeholder, the sliding window. |
+| UC-0092 | Config changes don't wait for the full pass | Removing a source calendar, changing the hub, or shrinking the window forces a full pass on the next run, not on the next daily cycle. |
+| UC-0093 | Migration preserves every mapping | The collection migration is idempotent, detects and resolves 4-tuple key collisions, and after cut-over every prior mapping still resolves to a live Google placeholder. |
+| UC-0094 | Sync owns its namespace | Sync's collections are `sync_`-prefixed and owned by `internal/sync`; no other module reads them (NFR-07). |
+
 ## Future Considerations
 
 The following are not in the current roadmap but are anticipated extensions:
@@ -134,6 +146,7 @@ The following are not in the current roadmap but are anticipated extensions:
 | NFR-05 | OAuth token refresh is handled transparently — a sync pass or bulk operation does not fail due to an expired access token if a valid refresh token exists, including across a multi-request bulk operation. |
 | NFR-06 | Bulk operations over many events complete without exceeding request timeouts and surface progress to the user, rather than appearing to hang. |
 | NFR-07 | Each tool module owns its own store collections under a module-prefixed namespace; modules access another module's data only through its exported API, never its raw collections. |
+| NFR-08 | After M8, an idle sync pass performs O(1) Firestore reads (a small fixed floor: configs + config + sources + running-log ≈ 5–10 per user), and a full reconciliation pass runs at most once per day per user. |
 
 ## Use Case Status
 
@@ -147,4 +160,5 @@ Track implementation status here. E2e tests for all "done" use cases must pass i
 | M4 | UC-0040 – UC-0049 | done (UC-0040–UC-0049 manual only) |
 | M5 | UC-0050 – UC-0060 | implemented (manual only); e2e status audit pending |
 | M6 | UC-0070 – UC-0074 | done (UC-0070–0073 unit-tested; browser/live-Google validation manual) |
-| M7 | UC-0080 – UC-0084 | not started |
+| M7 | UC-0080 – UC-0084 | done (UC-0081 tested via the endpoint seam; UC-0080/0082/0083 browser/live-Google manual; UC-0084 e2e) |
+| M8 | UC-0090 – UC-0094 | not started |
