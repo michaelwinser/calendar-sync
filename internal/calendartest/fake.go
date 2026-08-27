@@ -57,11 +57,13 @@ import (
 var baseTime = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // Counts tallies operations the fake has served, by type. Reads is the sum of the
-// list-style read calls (Calendars + WindowList + Incremental + PropertyList) — the
-// Google-side analogue of the Firestore read count the cost work targets.
+// list-style read calls (Calendars + WindowList + FullSyncList + Incremental +
+// PropertyList) — the Google-side analogue of the Firestore read count the cost work
+// targets.
 type Counts struct {
 	Calendars    int // GET /users/me/calendarList
-	WindowList   int // GET events with timeMin/timeMax (full window read)
+	WindowList   int // GET events with timeMin/timeMax (windowed read)
+	FullSyncList int // GET events unrestricted (no window/filter) — the token bootstrap
 	Incremental  int // GET events with syncToken
 	PropertyList int // GET events with privateExtendedProperty filter
 	Create       int
@@ -71,7 +73,7 @@ type Counts struct {
 
 // Reads returns the total list-style read calls served.
 func (c Counts) Reads() int {
-	return c.Calendars + c.WindowList + c.Incremental + c.PropertyList
+	return c.Calendars + c.WindowList + c.FullSyncList + c.Incremental + c.PropertyList
 }
 
 type fakeEvent struct {
@@ -100,6 +102,7 @@ type Fake struct {
 	nextID     int
 	counts     Counts
 	failDelete map[string]bool // "calID\x00eventID" → delete returns 403 (test knob)
+	pageSize   int             // 0 = no cap (single page); >0 forces paging (test knob)
 }
 
 // New starts a fake and returns it. Call Close when done.
@@ -210,6 +213,15 @@ func (f *Fake) AllowDelete(calID, eventID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.failDelete, calID+"\x00"+eventID)
+}
+
+// SetPageSize caps how many events each list response returns, forcing the client to
+// page (n ≤ 0 restores single-page behaviour). Lets a test exercise the paging loops
+// with a handful of events instead of thousands.
+func (f *Fake) SetPageSize(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pageSize = n
 }
 
 // SyncToken returns the calendar's current sync token, as an unrestricted full-sync
@@ -374,7 +386,7 @@ func (f *Fake) handleList(w http.ResponseWriter, r *http.Request, calID string) 
 		for _, fe := range changed {
 			items = append(items, eventForDelta(fe))
 		}
-		writeJSON(w, map[string]any{"items": items, "nextSyncToken": c.token()})
+		f.emitPageLocked(w, c, items, q, true)
 		return
 	}
 
@@ -382,10 +394,13 @@ func (f *Fake) handleList(w http.ResponseWriter, r *http.Request, calID string) 
 	privateFilters := q["privateExtendedProperty"]
 	timeMin, hasMin := parseTime(q.Get("timeMin"))
 	timeMax, hasMax := parseTime(q.Get("timeMax"))
-	if len(privateFilters) > 0 {
+	switch {
+	case len(privateFilters) > 0:
 		f.counts.PropertyList++
-	} else {
+	case hasMin || hasMax:
 		f.counts.WindowList++
+	default:
+		f.counts.FullSyncList++ // unrestricted read — the token-establishing bootstrap
 	}
 
 	var items []calendar.GCalEvent
@@ -404,13 +419,43 @@ func (f *Fake) handleList(w http.ResponseWriter, r *http.Request, calID string) 
 		items = append(items, clone(fe.ev))
 	}
 	sortByStart(items)
-	// Google attaches nextSyncToken only to an UNRESTRICTED full-sync list — none of
-	// timeMin/timeMax/orderBy/privateExtendedProperty, which are all mutually exclusive
-	// with sync tokens. So the current client (which always sends a window + orderBy)
-	// never obtains a token, and its incremental path is dead until Phase 3 adds an
-	// unwindowed token-establishing read. Tests grab a token directly via SyncToken().
-	resp := map[string]any{"items": items}
-	if len(privateFilters) == 0 && !hasMin && !hasMax && q.Get("orderBy") == "" {
+	// A sync token is attached only to an UNRESTRICTED list (no timeMin/timeMax/orderBy/
+	// privateExtendedProperty — all mutually exclusive with sync tokens in Google's API).
+	// The windowed ListEvents therefore never gets one; ListEventsForSync is the read that
+	// does. See the package doc and calendar.ListEventsForSync.
+	issueToken := len(privateFilters) == 0 && !hasMin && !hasMax && q.Get("orderBy") == ""
+	f.emitPageLocked(w, c, items, q, issueToken)
+}
+
+// emitPageLocked writes one page of an ordered result set, honoring the client's
+// maxResults and the fake's page-size cap. A sync token (when issueToken) is attached
+// only to the LAST page — matching Google, where nextSyncToken and nextPageToken never
+// co-occur. Page tokens encode the offset ("page-<n>"); the client resends the base
+// query each page, so recomputing and re-slicing the (deterministically ordered) set is
+// stable. Caller holds f.mu.
+func (f *Fake) emitPageLocked(w http.ResponseWriter, c *fakeCal, items []calendar.GCalEvent, q url.Values, issueToken bool) {
+	pageSize := len(items)
+	if pageSize == 0 {
+		pageSize = 1
+	}
+	if f.pageSize > 0 && f.pageSize < pageSize {
+		pageSize = f.pageSize
+	}
+	if mr, err := strconv.Atoi(q.Get("maxResults")); err == nil && mr > 0 && mr < pageSize {
+		pageSize = mr
+	}
+	offset := 0
+	if n, err := strconv.Atoi(strings.TrimPrefix(q.Get("pageToken"), "page-")); err == nil && n > 0 {
+		offset = n
+	}
+	offset = min(offset, len(items))
+	end := min(offset+pageSize, len(items))
+
+	resp := map[string]any{"items": items[offset:end]}
+	switch {
+	case end < len(items):
+		resp["nextPageToken"] = "page-" + strconv.Itoa(end)
+	case issueToken:
 		resp["nextSyncToken"] = c.token()
 	}
 	writeJSON(w, resp)
