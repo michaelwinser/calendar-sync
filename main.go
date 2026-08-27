@@ -126,7 +126,108 @@ func main() {
 	syncCmd.Flags().Bool("dry-run", false, "Report what would change without making API writes")
 	cliApp.AddCommand(syncCmd)
 
+	cliApp.AddCommand(migrateCommand())
+
 	cliApp.Execute()
+}
+
+// migrateCommand builds the one-shot M8 data migration (namespace + point-lookup re-key
+// of synced_events). Non-destructive until `delete-old`; see docs/M8-plan.md Phase 2.
+func migrateCommand() *cobra.Command {
+	migrateCmd := &cobra.Command{
+		Use:   "migrate",
+		Short: "M8 sync-collection migration (namespace + point-lookup re-key)",
+	}
+
+	plan := func(apply bool) error {
+		if err := setup(); err != nil {
+			return err
+		}
+		rep, err := sync.MigrateSyncedEvents(a.DB(), apply)
+		if err != nil {
+			if rep != nil { // print partial progress before failing
+				printMigrationReport(rep, apply)
+			}
+			return err
+		}
+		if err := sync.MigrateSourceCalendars(a.DB(), apply, rep); err != nil {
+			printMigrationReport(rep, apply)
+			return err
+		}
+		printMigrationReport(rep, apply)
+		return nil
+	}
+
+	migrateCmd.AddCommand(&cobra.Command{
+		Use:   "dry-run",
+		Short: "Report what the migration would copy and any collisions, without writing",
+		RunE:  func(_ *cobra.Command, _ []string) error { return plan(false) },
+	})
+	migrateCmd.AddCommand(&cobra.Command{
+		Use:   "copy",
+		Short: "Copy into the re-keyed sync_* collections (idempotent; old collections untouched)",
+		RunE:  func(_ *cobra.Command, _ []string) error { return plan(true) },
+	})
+	migrateCmd.AddCommand(&cobra.Command{
+		Use:   "verify",
+		Short: "Check the new collection's keys structurally match the old data",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := setup(); err != nil {
+				return err
+			}
+			if err := sync.VerifyMigration(a.DB()); err != nil {
+				return err
+			}
+			fmt.Println("verify: OK — new sync_synced_events matches the old data by key-set")
+			return nil
+		},
+	})
+	deleteOld := &cobra.Command{
+		Use:   "delete-old",
+		Short: "DESTRUCTIVE: delete the old synced_events/source_calendars (run days after cutover)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if yes, _ := cmd.Flags().GetBool("yes"); !yes {
+				return fmt.Errorf("refusing to delete without --yes (this removes the migration rollback)")
+			}
+			if err := setup(); err != nil {
+				return err
+			}
+			syncedDeleted, sourceDeleted, err := sync.DeleteOld(a.DB())
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Deleted %d old synced_events and %d old source_calendars.\n", syncedDeleted, sourceDeleted)
+			return nil
+		},
+	}
+	deleteOld.Flags().Bool("yes", false, "Confirm the destructive delete")
+	migrateCmd.AddCommand(deleteOld)
+
+	return migrateCmd
+}
+
+// printMigrationReport prints the plan/result, surfacing collisions the operator must
+// review (a losing placeholder is a real event that will be untracked after cutover).
+func printMigrationReport(rep *sync.MigrationReport, applied bool) {
+	verb := "would copy"
+	if applied {
+		verb = "copied"
+	}
+	fmt.Printf("synced_events: %d old records → %d distinct keys (%s %d)\n",
+		rep.SyncedOldCount, rep.SyncedDistinctKey, verb, rep.SyncedWritten)
+	fmt.Printf("source_calendars: %d records (%s %d)\n", rep.SourceOldCount, verb, rep.SourceWritten)
+
+	if len(rep.Collisions) == 0 {
+		fmt.Println("No collisions.")
+		return
+	}
+	fmt.Printf("\n%d COLLISION(S) — newest UpdatedAt kept; review these orphaned placeholders:\n", len(rep.Collisions))
+	for _, c := range rep.Collisions {
+		for _, l := range c.Losers {
+			fmt.Printf("  key %s… : placeholder %s on calendar %s is now untracked (delete on Google if stale)\n",
+				c.Key[:12], l.TargetEventID, l.TargetCalendarID)
+		}
+	}
 }
 
 func decodeJSON(resp *http.Response, v interface{}) error {
