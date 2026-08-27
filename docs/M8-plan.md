@@ -42,9 +42,10 @@ can't be point-fetched — the blocker to incremental.
 Move sync + config + store + placeholder logic out of `internal/app` into `internal/sync`
 (same `RegisterRoutes`/`RegisterPages`); retire `internal/app`. **Promote `/api/calendars`**
 to a shared owner (a tiny `internal/calendars` module) — the coupling M7 recorded; tools
-and heatmap repoint. Reconcile the nudge auth discrepancy (code says unauthenticated;
-UC-0051 says OIDC/`X-Nudge-Key`) — this is the last milestone, so pick one. No data or
-endpoint changes.
+and heatmap repoint. Reconcile the nudge auth discrepancy: OIDC and `X-Nudge-Key` were
+both attempted in M5 and could not be made to work reliably, and the risk is low, so
+**document the endpoint as unauthenticated by design** (UC-0051 updated) rather than
+re-add auth. No data, endpoint, or auth-behaviour changes.
 
 ## Phase 2 — Collection migration: namespace + point-lookup key (staged, non-destructive)
 

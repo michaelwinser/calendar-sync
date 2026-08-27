@@ -119,6 +119,12 @@ LastSyncAt          string `json:"-"  store:"last_sync_at"`
 
 ## Nudge Auth Flow
 
+> **Superseded (M8):** Neither flow below could be made to work reliably in practice
+> despite significant diagnostic effort. The nudge endpoint ships **unauthenticated by
+> design** — mounted at `/sync/nudge` (outside `/api/`), it only triggers syncs already
+> due and exposes no user data, so the risk is low. The flows below are kept as a record
+> of what was attempted. See UC-0051.
+
 ### Cloud Run (OIDC — zero key management)
 
 ```

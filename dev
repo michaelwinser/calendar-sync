@@ -55,7 +55,8 @@ dev_setup_scheduler() {
     echo "[1/2] Enabling Cloud Scheduler API..."
     gcloud services enable cloudscheduler.googleapis.com --project="$PROJECT" 2>/dev/null
 
-    # 2. Create scheduler job (unauthenticated — nudge endpoint is rate-limited)
+    # 2. Create scheduler job (nudge is unauthenticated by design — see UC-0051;
+    #    it only triggers already-due syncs and exposes no user data)
     echo "[2/2] Creating scheduler job..."
     JOB_NAME="${APP_NAME}-nudge"
 

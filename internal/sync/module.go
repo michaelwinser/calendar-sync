@@ -12,7 +12,8 @@ func RegisterRoutes(deps platform.Deps) error {
 	}
 	s := &Server{Store: store, Google: deps.Google, Cal: deps.Cal}
 	s.registerAPI(deps.Router)
-	// Nudge is mounted outside /api/ to bypass session auth; it does its own auth.
+	// Nudge is mounted outside /api/ to bypass session auth; it is unauthenticated
+	// by design (see UC-0051 — only triggers already-due syncs, exposes no data).
 	deps.Router.Post("/sync/nudge", s.NudgeSync)
 	return nil
 }

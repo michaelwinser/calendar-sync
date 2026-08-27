@@ -75,7 +75,7 @@ Calendar Sync keeps a user's free/busy status consistent across multiple Google 
 | ID | Use Case | Description |
 |----|----------|-------------|
 | UC-0050 | Sync window parameter | `POST /api/sync` accepts a `days` query parameter to override the configured sync window. Defaults to `syncWindowWeeks * 7`. |
-| UC-0051 | Nudge endpoint for automated sync | `POST /api/sync/nudge` triggers sync for all users who are due based on their last sync time and configured interval. Auth: OIDC on Cloud Run, deployment key (`X-Nudge-Key`) on TrueNAS/localhost. |
+| UC-0051 | Nudge endpoint for automated sync | `POST /sync/nudge` triggers sync for all users who are due based on their last sync time and configured interval. **Unauthenticated by design:** mounted outside `/api/` to bypass session auth, it only triggers syncs already due (per the per-user interval) and exposes no user data, so the risk is low. OIDC (Cloud Run) and a shared `X-Nudge-Key` were both attempted and could not be made to work reliably; see `docs/M5-plan.md`. |
 | UC-0052 | Stored refresh token for background sync | The user's Google refresh token is captured on login and stored in SyncConfig. The nudge endpoint uses it to get fresh access tokens without a browser session. |
 | UC-0053 | Past event auto-cleanup | At the end of each sync pass, placeholder events whose end date is before today are automatically deleted from the hub and all sync calendars. No configuration required. |
 | UC-0054 | Batch sync writes | Sync create/update/delete operations use Google's batch API (up to 50 per request) for improved performance. |
