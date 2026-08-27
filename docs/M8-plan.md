@@ -120,9 +120,21 @@ rule, since the fast path has no "unmatched remainder"):
 **Full pass (≤ once/day/user):** the reconciliation backstop — but note today's full pass
 **also uses the source sync token** (BLOCKING 3), so it never re-reads sources and can't
 be the backstop the fast path relies on. The full pass must **clear `SourceCalendar.SyncToken`
-and do a tokenless `ListEvents(now, now+window)` per source**, re-establishing the token —
-which also fixes the window never sliding (a latent bug against UC-0031/0046). Then full
-outbound reconciliation + cleanup of orphans/past events.
+and re-list each source**, re-establishing the token — which also fixes the window never
+sliding (a latent bug against UC-0031/0046). Then full outbound reconciliation + cleanup of
+orphans/past events.
+
+**BLOCKING 3b — token establishment cannot use a windowed list (found via the Phase 0b
+harness).** Google attaches `nextSyncToken` only to an *unrestricted* `events.list` — none
+of `timeMin`/`timeMax`/`orderBy`/`privateExtendedProperty`, which are all mutually exclusive
+with sync tokens. Today's `ListEvents` always sends `timeMin`/`timeMax`/`orderBy`, so it
+**never receives a token and the entire incremental path is dead code** (every pass is a full
+scan — the cost we're fixing). The token-establishing read must therefore be a **new
+`singleEvents=true`-only list with no window/orderBy**, then **filter the window client-side**
+(consistent with the fast pass, which already treats the token stream as unbounded in time).
+This needs a new `calendar.Client` method — the existing `ListEvents`/`ListEventsFields`
+can't express it. A characterization test (`internal/sync/behavior_test.go`) pins the current
+"full window read every pass, `Incremental==0`" behavior so the change is visible when it lands.
 
 **Full-pass-only invariants (BLOCKING 6 — the spec of what a day of staleness costs):**
 removed source cleanup, **old-hub cleanup (UC-0060 — confirm it exists in the sync path at
