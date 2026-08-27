@@ -14,6 +14,11 @@
 //     follow-up).
 //   - The `fields` partial-response mask is ignored (the fake always returns full
 //     events, which is correct for the client, and sync must never use a mask).
+//   - A nextSyncToken is attached only to an unrestricted list (no timeMin/timeMax/
+//     orderBy/privateExtendedProperty), matching Google — where those params are
+//     mutually exclusive with sync tokens. The current client always sends a window,
+//     so it never obtains a token and its incremental path is effectively dead; that's
+//     the crux Phase 3 must fix. Tests obtain a starting token via SyncToken().
 //   - Incremental deltas are NOT time-filtered: a sync token replays every change
 //     regardless of window. This is deliberate — the M8 plan has the fast pass apply
 //     the timeMin/timeMax window client-side, treating the token stream as unbounded
@@ -187,6 +192,19 @@ func (f *Fake) ExpireTokens(calID string) {
 	}
 }
 
+// SyncToken returns the calendar's current sync token, as an unrestricted full-sync
+// list would. It's a test hook: the current client only issues windowed reads, which
+// Google (and this fake) don't attach a token to, so a test that wants to exercise the
+// incremental endpoint obtains its starting token here. Empty for an unknown calendar.
+func (f *Fake) SyncToken(calID string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if c := f.cals[calID]; c != nil {
+		return c.token()
+	}
+	return ""
+}
+
 // --- internal state helpers (caller holds f.mu) ---
 
 func (f *Fake) mustCal(calID string) *fakeCal {
@@ -307,7 +325,18 @@ func (f *Fake) handleList(w http.ResponseWriter, r *http.Request, calID string) 
 
 	// Incremental: syncToken present → delta since that version, incl. tombstones,
 	// ordered by change version (the order Google reports changes in).
-	if st := q.Get("syncToken"); st != "" {
+	if _, hasSyncToken := q["syncToken"]; hasSyncToken {
+		st := q.Get("syncToken")
+		if st == "" {
+			apiError(w, http.StatusBadRequest, "badRequest", "syncToken must not be empty.")
+			return
+		}
+		// Sync tokens are mutually exclusive with these params (real Google → 400).
+		if q.Get("timeMin") != "" || q.Get("timeMax") != "" || q.Get("orderBy") != "" || len(q["privateExtendedProperty"]) > 0 {
+			apiError(w, http.StatusBadRequest, "badRequest",
+				"syncToken cannot be combined with timeMin/timeMax/orderBy/privateExtendedProperty.")
+			return
+		}
 		f.counts.Incremental++
 		since, ok := parseToken(st)
 		if !ok || since < c.tokenBase {
@@ -355,9 +384,13 @@ func (f *Fake) handleList(w http.ResponseWriter, r *http.Request, calID string) 
 		items = append(items, clone(fe.ev))
 	}
 	sortByStart(items)
-	// A window read (no filters) issues a fresh sync token; a filtered read does not.
+	// Google attaches nextSyncToken only to an UNRESTRICTED full-sync list — none of
+	// timeMin/timeMax/orderBy/privateExtendedProperty, which are all mutually exclusive
+	// with sync tokens. So the current client (which always sends a window + orderBy)
+	// never obtains a token, and its incremental path is dead until Phase 3 adds an
+	// unwindowed token-establishing read. Tests grab a token directly via SyncToken().
 	resp := map[string]any{"items": items}
-	if len(privateFilters) == 0 {
+	if len(privateFilters) == 0 && !hasMin && !hasMax && q.Get("orderBy") == "" {
 		resp["nextSyncToken"] = c.token()
 	}
 	writeJSON(w, resp)

@@ -40,7 +40,7 @@ func TestCalendarListAndWindowRead(t *testing.T) {
 		t.Fatalf("want 2 calendars, got %d", len(cals))
 	}
 
-	// Window read excludes the June event; issues a sync token.
+	// Window read excludes the June event.
 	res, err := c.ListEvents(ctx, tok, "work@x",
 		time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC))
@@ -50,8 +50,10 @@ func TestCalendarListAndWindowRead(t *testing.T) {
 	if len(res.Events) != 1 || res.Events[0].Summary != "Standup" {
 		t.Fatalf("window read: want [Standup], got %+v", res.Events)
 	}
-	if res.SyncToken == "" {
-		t.Fatal("window read should return a sync token")
+	// A windowed read gets NO sync token from Google (timeMin/timeMax are mutually
+	// exclusive with sync tokens) — the fake mirrors that.
+	if res.SyncToken != "" {
+		t.Fatalf("windowed read should not return a sync token, got %q", res.SyncToken)
 	}
 }
 
@@ -62,20 +64,14 @@ func TestIncrementalDeltaLifecycle(t *testing.T) {
 	c := f.Client()
 	ctx := context.Background()
 
-	// Establish a baseline token with an empty window read.
-	base, err := c.ListEvents(ctx, tok, "work@x",
-		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Create via the client, then incremental should report exactly that event.
+	// Capture a baseline token (as an unrestricted full sync would), then create an
+	// event; incremental since the baseline should report exactly that event.
+	baseTok := f.SyncToken("work@x")
 	created, err := c.CreateEvent(ctx, tok, "work@x", ptr(ev("New", "2026-03-02T09:00:00Z", "2026-03-02T10:00:00Z")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	d1, err := c.ListEventsIncremental(ctx, tok, "work@x", base.SyncToken)
+	d1, err := c.ListEventsIncremental(ctx, tok, "work@x", baseTok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,14 +108,12 @@ func TestExpiredSyncToken(t *testing.T) {
 	c := f.Client()
 	ctx := context.Background()
 
-	base, _ := c.ListEvents(ctx, tok, "work@x",
-		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC))
+	baseTok := f.SyncToken("work@x")
 	// Expire immediately, with NO intervening mutation — the case that must still 410
 	// (a version bump inside ExpireTokens is what makes this work).
 	f.ExpireTokens("work@x")
 
-	_, err := c.ListEventsIncremental(ctx, tok, "work@x", base.SyncToken)
+	_, err := c.ListEventsIncremental(ctx, tok, "work@x", baseTok)
 	if !errors.Is(err, calendar.ErrSyncTokenExpired) {
 		t.Fatalf("want ErrSyncTokenExpired, got %v", err)
 	}
@@ -200,11 +194,12 @@ func TestCountsTrackReadsAndWrites(t *testing.T) {
 	ctx := context.Background()
 
 	_, _ = c.ListCalendars(ctx, tok)
-	base, _ := c.ListEvents(ctx, tok, "work@x",
+	_, _ = c.ListEvents(ctx, tok, "work@x",
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC))
+	baseTok := f.SyncToken("work@x")
 	_, _ = c.CreateEvent(ctx, tok, "work@x", ptr(ev("n", "2026-03-02T09:00:00Z", "2026-03-02T10:00:00Z")))
-	_, _ = c.ListEventsIncremental(ctx, tok, "work@x", base.SyncToken)
+	_, _ = c.ListEventsIncremental(ctx, tok, "work@x", baseTok)
 
 	got := f.Counts()
 	if got.Calendars != 1 || got.WindowList != 1 || got.Incremental != 1 || got.Create != 1 {
