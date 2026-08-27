@@ -102,12 +102,36 @@ func TestBatchDeleteBoundaryIsValid(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL) // BatchURL = srv.URL + "/batch"
-	deleted, errs := c.BatchDeleteEvents(context.Background(), "tok", "michaelw@xwind.io", []string{"a", "b"})
-	if deleted != 2 || errs != 0 {
-		t.Fatalf("deleted=%d errs=%d, want 2/0", deleted, errs)
+	res := c.BatchDeleteEvents(context.Background(), "tok", "michaelw@xwind.io", []string{"a", "b"})
+	if len(res.Gone) != 2 || len(res.Failed) != 0 {
+		t.Fatalf("gone=%v failed=%v, want both a,b gone", res.Gone, res.Failed)
 	}
 	if boundary == "" || len(boundary) > 70 || strings.ContainsAny(boundary, "@()<>,;:\\\"/[]?= \t") {
 		t.Fatalf("invalid MIME boundary: %q", boundary)
+	}
+}
+
+// Batch parts are attributed by Content-ID, not position — Google doesn't guarantee
+// response order. Here the parts come back reversed: item1 (b) succeeds, item0 (a)
+// fails. Correct attribution requires reading Content-ID; positional order would swap
+// the outcomes and drop the wrong mapping.
+func TestBatchDeleteAttributesByContentID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "multipart/mixed; boundary=resp")
+		w.Write([]byte(
+			"--resp\r\nContent-Type: application/http\r\nContent-ID: <response-item1>\r\n\r\nHTTP/1.1 204 No Content\r\n\r\n" +
+				"--resp\r\nContent-Type: application/http\r\nContent-ID: <response-item0>\r\n\r\nHTTP/1.1 403 Forbidden\r\n\r\n" +
+				"--resp--\r\n"))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	res := c.BatchDeleteEvents(context.Background(), "tok", "cal", []string{"a", "b"})
+	if !res.Gone["b"] || res.Gone["a"] {
+		t.Fatalf("b (item1, 204) should be Gone and a should not: %+v", res)
+	}
+	if !res.Failed["a"] || res.Failed["b"] {
+		t.Fatalf("a (item0, 403) should be Failed and b should not: %+v", res)
 	}
 }
 

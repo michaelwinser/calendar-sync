@@ -364,11 +364,15 @@ func syncSourceToHub(ctx context.Context, cal *calendar.Client, token string, st
 				deleteIDs = append(deleteIDs, se.TargetEventID)
 				deleteRecords = append(deleteRecords, se)
 			}
-			deleted, errs := cal.BatchDeleteEvents(ctx, token, hubCalID, deleteIDs)
-			result.Deleted += deleted
-			result.Errors += errs
+			res := cal.BatchDeleteEvents(ctx, token, hubCalID, deleteIDs)
+			result.Deleted += len(res.Gone)
+			result.Errors += len(res.Failed)
+			// Drop only the mappings whose placeholder is actually gone; a failed
+			// delete keeps its record so the next pass retries (no orphaned placeholder).
 			for _, se := range deleteRecords {
-				store.DeleteSyncedEvent(se.ID)
+				if res.Gone[se.TargetEventID] {
+					store.DeleteSyncedEvent(se.ID)
+				}
 			}
 		}
 	}
@@ -590,11 +594,13 @@ func syncOutboundToSource(ctx context.Context, cal *calendar.Client, token strin
 		if dryRun {
 			result.Deleted += len(outboundDeleteIDs)
 		} else {
-			deleted, errs := cal.BatchDeleteEvents(ctx, token, targetCalID, outboundDeleteIDs)
-			result.Deleted += deleted
-			result.Errors += errs
+			res := cal.BatchDeleteEvents(ctx, token, targetCalID, outboundDeleteIDs)
+			result.Deleted += len(res.Gone)
+			result.Errors += len(res.Failed)
 			for _, se := range outboundDeleteRecords {
-				store.DeleteSyncedEvent(se.ID)
+				if res.Gone[se.TargetEventID] {
+					store.DeleteSyncedEvent(se.ID)
+				}
 			}
 		}
 	}
@@ -635,11 +641,16 @@ func cleanupRemovedSources(ctx context.Context, cal *calendar.Client, token stri
 		for _, se := range records {
 			ids = append(ids, se.TargetEventID)
 		}
-		deleted, errs := cal.BatchDeleteEvents(ctx, token, calID, ids)
-		result.Deleted += deleted
-		result.Errors += errs
+		res := cal.BatchDeleteEvents(ctx, token, calID, ids)
+		result.Deleted += len(res.Gone)
+		result.Errors += len(res.Failed)
 		for _, se := range records {
-			store.DeleteSyncedEvent(se.ID)
+			if res.Gone[se.TargetEventID] {
+				store.DeleteSyncedEvent(se.ID)
+			}
+			// A permanently-failing delete here retries every pass with no backstop
+			// (the source is already out of config). Bounded retry via a DeleteAttempts
+			// counter is deferred to the Phase 2/3 rework — see docs/M8-plan.md Phase 4.
 		}
 	}
 }

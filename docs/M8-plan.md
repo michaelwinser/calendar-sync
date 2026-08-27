@@ -153,7 +153,19 @@ passes and risks the NFR-01 timeout.
 
 The `SyncedEvent` record is deleted regardless of whether the Google placeholder delete
 succeeded, orphaning placeholders. Delete the record only when the Google delete succeeded
-or the event was already gone (404/410). Fold in during the restructure.
+or the event was already gone (404/410).
+
+**Done** (commit on `feat/sync-delete-gating`): `BatchDeleteEvents` now returns per-event
+outcomes (`Gone`/`Failed`, attributed by Content-ID, 404/410 = gone), and all three sync
+delete sites drop only the mappings whose placeholder is confirmed gone. Regression-tested
+via the fake (`TestFailedPlaceholderDeleteKeepsRecord`: a failed delete keeps the record
+and recovers on retry; `TestBatchDeleteAttributesByContentID`: out-of-order attribution).
+
+**Deferred to the Phase 2/3 rework — bounded retry.** A *permanent* failure (revoked write
+access, deleted target calendar) now keeps the record and re-errors every pass forever;
+`cleanupRemovedSources` is the worst case, since the source is already out of config and
+nothing else reconciles it. Add a `DeleteAttempts` counter to `SyncedEvent` (Phase 2
+re-keys it anyway) and give up after N with a logged warning.
 
 ## Data Model Changes
 - `synced_events` → `sync_synced_events`, re-keyed by `(userID, sourceCalID, sourceEventID, targetCalID)`.

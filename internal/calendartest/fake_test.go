@@ -172,17 +172,22 @@ func TestBatchDelete(t *testing.T) {
 	id1 := f.SeedEvent("work@x", ev("a", "2026-03-02T09:00:00Z", "2026-03-02T10:00:00Z"))
 	id2 := f.SeedEvent("work@x", ev("b", "2026-03-03T09:00:00Z", "2026-03-03T10:00:00Z"))
 
+	f.FailDelete("work@x", id2) // id2's delete will 403
+
 	c := f.Client()
-	deleted, errCount := c.BatchDeleteEvents(context.Background(), tok, "work@x",
+	res := c.BatchDeleteEvents(context.Background(), tok, "work@x",
 		[]string{id1, id2, "missing"})
-	if deleted != 2 {
-		t.Fatalf("want 2 deleted, got %d (errors=%d)", deleted, errCount)
+	// id1 deleted (2xx) and "missing" already-absent (404) → Gone; id2 → Failed.
+	if !res.Gone[id1] || !res.Gone["missing"] {
+		t.Fatalf("want id1 and missing Gone, got %+v", res)
 	}
-	if errCount != 1 {
-		t.Fatalf("want 1 error (missing id), got %d", errCount)
+	if !res.Failed[id2] || res.Gone[id2] {
+		t.Fatalf("want id2 Failed, got %+v", res)
 	}
-	if got := f.Events("work@x"); len(got) != 0 {
-		t.Fatalf("want calendar empty after batch delete, got %+v", got)
+	// id2 must survive (its delete failed); id1 is gone.
+	got := f.Events("work@x")
+	if len(got) != 1 || got[0].ID != id2 {
+		t.Fatalf("want only id2 remaining, got %+v", got)
 	}
 }
 

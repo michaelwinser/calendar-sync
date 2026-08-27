@@ -124,6 +124,105 @@ func TestFullSyncCreatesPlaceholderAndConverges(t *testing.T) {
 	}
 }
 
+// TestFailedPlaceholderDeleteKeepsRecord is the Phase 4 regression: when the Google
+// delete of an orphaned placeholder fails, the SyncedEvent record must survive so the
+// next pass retries — otherwise the record is dropped and the placeholder is orphaned
+// forever. When the delete later succeeds, the record is cleaned up.
+func TestFailedPlaceholderDeleteKeepsRecord(t *testing.T) {
+	const (
+		userID = "u1"
+		hubID  = "hub@x"
+		srcID  = "work@x"
+		token  = "tok"
+	)
+	ctx := context.Background()
+
+	store := newTestStore(t)
+	if _, err := store.SaveConfig(userID, SaveConfigInput{
+		HubCalendarID: hubID, HubCalendarName: "Hub", SyncWindowWeeks: 8, SyncIntervalMinutes: 15,
+	}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	if _, err := store.ReconcileSources(userID, []SourceCalendarInput{{CalendarID: srcID, CalendarName: "Work"}}); err != nil {
+		t.Fatalf("ReconcileSources: %v", err)
+	}
+	reload := func() (*SyncConfig, []SourceCalendar) {
+		cfg, err := store.GetConfig(userID)
+		if err != nil {
+			t.Fatalf("GetConfig: %v", err)
+		}
+		sources, err := store.GetSources(userID)
+		if err != nil {
+			t.Fatalf("GetSources: %v", err)
+		}
+		return cfg, sources
+	}
+
+	fake := calendartest.New()
+	defer fake.Close()
+	fake.AddCalendar(hubID, "Hub", false)
+	fake.AddCalendar(srcID, "Work", true)
+	start := time.Now().Add(48 * time.Hour).UTC()
+	srcEvent := fake.SeedEvent(srcID, calendar.GCalEvent{
+		Summary: "Doomed",
+		Start:   calendar.EventTime{DateTime: start.Format(time.RFC3339)},
+		End:     calendar.EventTime{DateTime: start.Add(30 * time.Minute).Format(time.RFC3339)},
+	})
+
+	// Pass 1: create the placeholder.
+	cfg, sources := reload()
+	if _, err := RunSync(ctx, fake.Client(), token, store, cfg, sources); err != nil {
+		t.Fatalf("pass 1: %v", err)
+	}
+	ph := placeholdersOn(fake, hubID)
+	if len(ph) != 1 {
+		t.Fatalf("want 1 placeholder after pass 1, got %d", len(ph))
+	}
+	placeholderID := ph[0].ID
+
+	// Now the source event disappears (→ placeholder becomes an orphan to delete) and
+	// that placeholder's delete is rigged to fail.
+	if err := fake.Client().DeleteEvent(ctx, token, srcID, srcEvent); err != nil {
+		t.Fatalf("deleting source event: %v", err)
+	}
+	fake.FailDelete(hubID, placeholderID)
+
+	// Pass 2: orphan cleanup tries to delete the placeholder and fails.
+	cfg, sources = reload()
+	res2, err := RunSync(ctx, fake.Client(), token, store, cfg, sources)
+	if err != nil {
+		t.Fatalf("pass 2: %v", err)
+	}
+	if res2.Errors == 0 {
+		t.Fatalf("pass 2 should report the failed delete as an error")
+	}
+	if len(placeholdersOn(fake, hubID)) != 1 {
+		t.Fatalf("placeholder should still exist after a failed delete")
+	}
+	// The mapping MUST survive so pass 3 retries — the regression this test guards.
+	synced, err := store.GetSyncedEventsForUser(userID)
+	if err != nil {
+		t.Fatalf("GetSyncedEventsForUser: %v", err)
+	}
+	if len(synced) != 1 {
+		t.Fatalf("failed delete must keep the SyncedEvent record, got %d records", len(synced))
+	}
+
+	// Pass 3: allow the delete to succeed → placeholder and record both cleaned up.
+	fake.AllowDelete(hubID, placeholderID)
+	cfg, sources = reload()
+	if _, err := RunSync(ctx, fake.Client(), token, store, cfg, sources); err != nil {
+		t.Fatalf("pass 3: %v", err)
+	}
+	if got := placeholdersOn(fake, hubID); len(got) != 0 {
+		t.Fatalf("placeholder should be gone after recovery, got %d", len(got))
+	}
+	synced, _ = store.GetSyncedEventsForUser(userID)
+	if len(synced) != 0 {
+		t.Fatalf("record should be cleaned up after successful delete, got %d", len(synced))
+	}
+}
+
 func placeholdersOn(fake *calendartest.Fake, calID string) []calendar.GCalEvent {
 	var out []calendar.GCalEvent
 	for _, ev := range fake.Events(calID) {
