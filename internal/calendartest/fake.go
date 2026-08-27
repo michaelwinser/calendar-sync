@@ -95,10 +95,11 @@ type fakeCal struct {
 type Fake struct {
 	srv *httptest.Server
 
-	mu     sync.Mutex
-	cals   map[string]*fakeCal
-	nextID int
-	counts Counts
+	mu         sync.Mutex
+	cals       map[string]*fakeCal
+	nextID     int
+	counts     Counts
+	failDelete map[string]bool // "calID\x00eventID" → delete returns 403 (test knob)
 }
 
 // New starts a fake and returns it. Call Close when done.
@@ -190,6 +191,25 @@ func (f *Fake) ExpireTokens(calID string) {
 		c.version++
 		c.tokenBase = c.version
 	}
+}
+
+// FailDelete makes every delete (single or batch) of the given event on the given
+// calendar return 403 — a permanent failure — so a test can verify the sync engine
+// keeps the mapping rather than orphaning the placeholder.
+func (f *Fake) FailDelete(calID, eventID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failDelete == nil {
+		f.failDelete = map[string]bool{}
+	}
+	f.failDelete[calID+"\x00"+eventID] = true
+}
+
+// AllowDelete undoes a prior FailDelete for the given event.
+func (f *Fake) AllowDelete(calID, eventID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.failDelete, calID+"\x00"+eventID)
 }
 
 // SyncToken returns the calendar's current sync token, as an unrestricted full-sync
@@ -442,6 +462,10 @@ func (f *Fake) handleDelete(w http.ResponseWriter, _ *http.Request, calID, event
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.counts.Delete++
+	if f.failDelete[calID+"\x00"+eventID] {
+		apiError(w, http.StatusForbidden, "forbidden", "Delete forbidden (test knob).")
+		return
+	}
 	if f.deleteLocked(calID, eventID) {
 		w.WriteHeader(http.StatusNoContent)
 	} else {
@@ -480,11 +504,9 @@ func (f *Fake) handleBatch(w http.ResponseWriter, r *http.Request) {
 	respBoundary := "batch_resp_" + strconv.Itoa(int(time.Now().UnixNano()))
 	var out strings.Builder
 	f.mu.Lock()
+	item := 0
 	for {
 		part, err := mr.NextPart()
-		if err == io.EOF {
-			break
-		}
 		if err != nil {
 			break
 		}
@@ -493,13 +515,20 @@ func (f *Fake) handleBatch(w http.ResponseWriter, r *http.Request) {
 		status := "404 Not Found"
 		if ok {
 			f.counts.Delete++
-			if f.deleteLocked(calID, eventID) {
+			switch {
+			case f.failDelete[calID+"\x00"+eventID]:
+				status = "403 Forbidden"
+			case f.deleteLocked(calID, eventID):
 				status = "204 No Content"
 			}
 		}
+		// Echo a Content-ID (parts are emitted in request order, so item index matches)
+		// to exercise the client's Content-ID→event mapping.
 		out.WriteString("--" + respBoundary + "\r\n")
-		out.WriteString("Content-Type: application/http\r\n\r\n")
+		out.WriteString("Content-Type: application/http\r\n")
+		fmt.Fprintf(&out, "Content-ID: <response-item%d>\r\n\r\n", item)
 		out.WriteString("HTTP/1.1 " + status + "\r\n\r\n")
+		item++
 	}
 	f.mu.Unlock()
 	out.WriteString("--" + respBoundary + "--\r\n")

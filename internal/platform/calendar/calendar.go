@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -357,23 +359,35 @@ func (c *Client) DeleteEvent(ctx context.Context, token, calendarID, eventID str
 	return nil
 }
 
-// BatchDeleteEvents deletes multiple events using Google's batch API (≤50 per
-// request). Returns counts of deleted and errored.
-func (c *Client) BatchDeleteEvents(ctx context.Context, token, calendarID string, eventIDs []string) (deleted, errors int) {
-	const batchSize = 50
-	for i := 0; i < len(eventIDs); i += batchSize {
-		end := i + batchSize
-		if end > len(eventIDs) {
-			end = len(eventIDs)
-		}
-		d, e := c.doBatchDelete(ctx, token, calendarID, eventIDs[i:end])
-		deleted += d
-		errors += e
-	}
-	return
+// BatchDeleteResult reports per-event outcomes of a batch delete. An event Google
+// confirmed deleted OR reported already-absent (2xx/404/410) is in Gone — its mapping
+// is safe to drop, consistent with DeleteEvent's idempotency. An event whose delete
+// genuinely failed is in Failed — keep its mapping and retry on the next pass.
+type BatchDeleteResult struct {
+	Gone   map[string]bool
+	Failed map[string]bool
 }
 
-func (c *Client) doBatchDelete(ctx context.Context, token, calendarID string, eventIDs []string) (deleted, errors int) {
+// BatchDeleteEvents deletes multiple events using Google's batch API (≤50 per
+// request), reporting each event's outcome so callers can drop only the mappings
+// whose placeholder is actually gone.
+func (c *Client) BatchDeleteEvents(ctx context.Context, token, calendarID string, eventIDs []string) BatchDeleteResult {
+	res := BatchDeleteResult{Gone: map[string]bool{}, Failed: map[string]bool{}}
+	const batchSize = 50
+	for i := 0; i < len(eventIDs); i += batchSize {
+		end := min(i+batchSize, len(eventIDs))
+		c.doBatchDelete(ctx, token, calendarID, eventIDs[i:end], &res)
+	}
+	return res
+}
+
+func (c *Client) doBatchDelete(ctx context.Context, token, calendarID string, eventIDs []string, res *BatchDeleteResult) {
+	markAllFailed := func() {
+		for _, id := range eventIDs {
+			res.Failed[id] = true
+		}
+	}
+
 	// Boundary must be an RFC 2046 token (no tspecials like '@', ≤70 chars), so it
 	// is derived from a timestamp, never from the calendar ID.
 	boundary := "batch_calsync_" + fmt.Sprintf("%d", time.Now().UnixNano())
@@ -381,7 +395,7 @@ func (c *Client) doBatchDelete(ctx context.Context, token, calendarID string, ev
 	for i, eventID := range eventIDs {
 		body.WriteString("--" + boundary + "\r\n")
 		body.WriteString("Content-Type: application/http\r\n")
-		body.WriteString(fmt.Sprintf("Content-ID: <item%d>\r\n", i))
+		fmt.Fprintf(&body, "Content-ID: <item%d>\r\n", i)
 		body.WriteString("\r\n")
 		path := "/calendar/v3/calendars/" + url.PathEscape(calendarID) +
 			"/events/" + url.PathEscape(eventID) + "?sendUpdates=none"
@@ -392,30 +406,95 @@ func (c *Client) doBatchDelete(ctx context.Context, token, calendarID string, ev
 
 	req, err := http.NewRequestWithContext(ctx, "POST", c.BatchURL, &body)
 	if err != nil {
-		return 0, len(eventIDs)
+		markAllFailed()
+		return
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "multipart/mixed; boundary="+boundary)
 
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return 0, len(eventIDs)
+		markAllFailed()
+		return
 	}
-	respBody, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, len(eventIDs)
+		markAllFailed()
+		return
 	}
-	// Count per-part HTTP status lines in the multipart response.
-	for _, line := range strings.Split(string(respBody), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "HTTP/1.1 2") {
-			deleted++
-		} else if strings.HasPrefix(line, "HTTP/1.1 4") || strings.HasPrefix(line, "HTTP/1.1 5") {
-			errors++
+	_, params, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		markAllFailed()
+		return
+	}
+
+	// Map each response part back to its event and classify by embedded status. Parts
+	// carry a Content-ID echoing the request's <item{i}>; fall back to positional order
+	// when it's absent. 2xx/404/410 → Gone (idempotent); anything else → Failed.
+	mr := multipart.NewReader(resp.Body, params["boundary"])
+	seen := make([]bool, len(eventIDs))
+	pos := 0
+	for {
+		part, err := mr.NextPart()
+		if err != nil {
+			break
+		}
+		// Content-ID comes back bracketed ("<response-item3>"); trim before parsing.
+		// It's the only reliable attribution — Google doesn't guarantee part order —
+		// so positional (pos) is a fallback only for responses that omit it.
+		idx := pos
+		cid := strings.Trim(part.Header.Get("Content-ID"), "<>")
+		if n, ok := trailingInt(cid); ok && n >= 0 && n < len(eventIDs) {
+			idx = n
+		}
+		partBody, _ := io.ReadAll(part)
+		pos++
+		if idx >= len(eventIDs) {
+			continue
+		}
+		seen[idx] = true
+		if status := firstHTTPStatus(string(partBody)); status/100 == 2 || status == http.StatusNotFound || status == http.StatusGone {
+			res.Gone[eventIDs[idx]] = true
+		} else {
+			res.Failed[eventIDs[idx]] = true
 		}
 	}
-	return
+	// Any event with no corresponding response part is treated as failed (retry).
+	for i, ok := range seen {
+		if !ok {
+			res.Failed[eventIDs[i]] = true
+		}
+	}
+}
+
+// trailingInt extracts the trailing integer from a Content-ID like "<response-item3>".
+func trailingInt(s string) (int, bool) {
+	i := len(s)
+	for i > 0 && s[i-1] >= '0' && s[i-1] <= '9' {
+		i--
+	}
+	if i == len(s) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s[i:])
+	return n, err == nil
+}
+
+// firstHTTPStatus returns the status code from the first "HTTP/1.1 NNN" line in a
+// batch response part, or 0 if none is found.
+func firstHTTPStatus(part string) int {
+	for line := range strings.SplitSeq(part, "\n") {
+		line = strings.TrimSpace(line)
+		if after, ok := strings.CutPrefix(line, "HTTP/1.1 "); ok {
+			fields := strings.Fields(after)
+			if len(fields) > 0 {
+				if n, err := strconv.Atoi(fields[0]); err == nil {
+					return n
+				}
+			}
+		}
+	}
+	return 0
 }
 
 // --- HTTP with classified retry ---
