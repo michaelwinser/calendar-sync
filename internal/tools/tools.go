@@ -12,9 +12,9 @@ import (
 	"github.com/michaelwinser/appbase"
 	"github.com/michaelwinser/appbase/server"
 
-	"github.com/michaelwinser/calendar-sync/internal/app"
 	"github.com/michaelwinser/calendar-sync/internal/platform"
 	"github.com/michaelwinser/calendar-sync/internal/platform/calendar"
+	"github.com/michaelwinser/calendar-sync/internal/sync"
 )
 
 type module struct {
@@ -87,7 +87,7 @@ func (m *module) searchEvents(w http.ResponseWriter, r *http.Request) {
 		// Fetch all sync-engine placeholders (via sync's exported query), then filter
 		// by date client-side (privateExtendedProperty + timeMin/timeMax don't combine
 		// reliably in the API).
-		all, err := app.ListSyncPlaceholders(r.Context(), m.cal, token, calendarID)
+		all, err := sync.ListSyncPlaceholders(r.Context(), m.cal, token, calendarID)
 		if err != nil {
 			server.RespondError(w, http.StatusBadGateway, "Google Calendar API: "+err.Error())
 			return

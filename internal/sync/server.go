@@ -1,4 +1,4 @@
-package app
+package sync
 
 import (
 	"encoding/json"
@@ -23,9 +23,9 @@ type Server struct {
 	Cal    *calendar.Client
 }
 
-// registerAPI mounts the app's API routes on r.
+// registerAPI mounts the sync module's API routes on r.
 func (s *Server) registerAPI(r chi.Router) {
-	r.Get("/api/calendars", s.ListCalendars)
+	// GET /api/calendars is owned by the shared internal/calendars module.
 	r.Get("/api/config", s.GetConfig)
 	r.Put("/api/config", s.PutConfig)
 	r.Post("/api/sync", s.TriggerSync)
@@ -47,23 +47,6 @@ func (s *Server) Status(w http.ResponseWriter, r *http.Request) {
 		"email":  appbase.Email(r),
 		"status": "ok",
 	})
-}
-
-// ListCalendars fetches the user's Google Calendar list.
-func (s *Server) ListCalendars(w http.ResponseWriter, r *http.Request) {
-	token, err := platform.AccessToken(r)
-	if err != nil {
-		server.RespondError(w, http.StatusForbidden, err.Error())
-		return
-	}
-
-	calendars, err := s.Cal.ListCalendars(r.Context(), token)
-	if err != nil {
-		server.RespondError(w, http.StatusBadGateway, "Google Calendar API: "+err.Error())
-		return
-	}
-
-	server.RespondJSON(w, http.StatusOK, calendars)
 }
 
 // configResponse is the JSON shape for GET /api/config.

@@ -15,9 +15,9 @@ import (
 	"github.com/michaelwinser/appbase/server"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/michaelwinser/calendar-sync/internal/app"
 	"github.com/michaelwinser/calendar-sync/internal/platform"
 	"github.com/michaelwinser/calendar-sync/internal/platform/calendar"
+	"github.com/michaelwinser/calendar-sync/internal/sync"
 )
 
 const (
@@ -229,8 +229,8 @@ func includeEvent(ev calendar.GCalEvent) bool {
 // canonicalID collapses the app's cross-calendar copies of one meeting: a placeholder
 // resolves to its source event, everything else to its own id.
 func canonicalID(ev calendar.GCalEvent) string {
-	if app.IsPlaceholder(ev) {
-		if src := app.SourceEventID(ev); src != "" {
+	if sync.IsPlaceholder(ev) {
+		if src := sync.SourceEventID(ev); src != "" {
 			return src
 		}
 	}
