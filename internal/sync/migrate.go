@@ -281,12 +281,6 @@ func VerifyMigration(d *db.DB) error {
 // collections — the destructive final step, run days after the read-switch once the new
 // collections are confirmed healthy. Returns the counts deleted.
 func DeleteOld(d *db.DB) (syncedDeleted, sourceDeleted int, err error) {
-	// Safety gate: never drop the rollback unless the new collections are a verified
-	// copy. If copy never ran, verify fails (new empty, old non-empty) and we refuse.
-	if err := VerifyMigration(d); err != nil {
-		return 0, 0, fmt.Errorf("refusing delete-old: run copy + verify first: %w", err)
-	}
-
 	oldSynced, err := store.NewCollection[SyncedEvent](d, oldSyncedEvents)
 	if err != nil {
 		return 0, 0, err
@@ -294,6 +288,24 @@ func DeleteOld(d *db.DB) (syncedDeleted, sourceDeleted int, err error) {
 	syncedRecs, err := oldSynced.All()
 	if err != nil {
 		return 0, 0, err
+	}
+
+	// Safety gate: refuse if the new collection is empty while the old is not — the
+	// signal that `copy` never ran, which would make this a live-data wipe. A full
+	// VerifyMigration can't be the gate here: this runs days after cutover, by when the
+	// app has written new mappings and cleaned others, so the new/old key-sets have
+	// legitimately diverged. The operator eyeballs counts from `dry-run` instead.
+	newSynced, err := store.NewCollection[SyncedEvent](d, newSyncedEvents)
+	if err != nil {
+		return 0, 0, err
+	}
+	newRecs, err := newSynced.All()
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(syncedRecs) > 0 && len(newRecs) == 0 {
+		return 0, 0, fmt.Errorf("refusing delete-old: %s is empty but %s has %d records — run copy first",
+			newSyncedEvents, oldSyncedEvents, len(syncedRecs))
 	}
 	for _, r := range syncedRecs {
 		if err := oldSynced.Delete(r.ID); err != nil {

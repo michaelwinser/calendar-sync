@@ -223,6 +223,47 @@ func TestFailedPlaceholderDeleteKeepsRecord(t *testing.T) {
 	}
 }
 
+// TestCreateSyncedEventPointGet covers the M8 read-switch: mappings are keyed by their
+// deterministic 4-tuple hash and fetchable with a single point Get, and re-creating the
+// same 4-tuple upserts rather than duplicating.
+func TestCreateSyncedEventPointGet(t *testing.T) {
+	store := newTestStore(t)
+	se := &SyncedEvent{UserID: "u", SourceCalendarID: "a", SourceEventID: "e1", TargetCalendarID: "hub", TargetEventID: "p1"}
+	if err := store.CreateSyncedEvent(se); err != nil {
+		t.Fatal(err)
+	}
+	if want := SyncedEventKey("u", "a", "e1", "hub"); se.ID != want {
+		t.Fatalf("ID = %q, want deterministic key %q", se.ID, want)
+	}
+
+	got, err := store.GetSyncedEventByKey("u", "a", "e1", "hub")
+	if err != nil || got == nil {
+		t.Fatalf("point-get: %v (got %v)", err, got)
+	}
+	if got.TargetEventID != "p1" {
+		t.Fatalf("point-get returned wrong record: %q", got.TargetEventID)
+	}
+
+	// A missing key is (nil, nil), not an error.
+	if miss, err := store.GetSyncedEventByKey("u", "a", "absent", "hub"); err != nil || miss != nil {
+		t.Fatalf("missing key should be (nil,nil), got (%v,%v)", miss, err)
+	}
+
+	// An UPDATE on the same key replaces the mapping in place (the real flow's path for a
+	// changed source event); it does not create a second row.
+	got.TargetEventID = "p1-new"
+	if err := store.UpdateSyncedEvent(got); err != nil {
+		t.Fatal(err)
+	}
+	all, err := store.GetSyncedEventsForUser("u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].TargetEventID != "p1-new" {
+		t.Fatalf("update must replace in place, got %+v", all)
+	}
+}
+
 func placeholdersOn(fake *calendartest.Fake, calID string) []calendar.GCalEvent {
 	var out []calendar.GCalEvent
 	for _, ev := range fake.Events(calID) {
