@@ -260,6 +260,50 @@ func (c *Client) ListEventsIncremental(ctx context.Context, token, calendarID, s
 	return &result, nil
 }
 
+// ListEventsForSync performs the initial full-sync read that ESTABLISHES a sync token
+// for later ListEventsIncremental calls. It sends only singleEvents=true — no
+// timeMin/timeMax/orderBy/privateExtendedProperty, all of which Google refuses to pair
+// with a sync token (they 400 with a syncToken, and yield no nextSyncToken without one).
+// So this is the only read that can bootstrap incremental sync; the windowed ListEvents
+// never returns a token. It returns every (non-deleted) event on the calendar plus the
+// token; the caller applies its time window client-side, keeping the initial and
+// incremental tiers consistent (an incremental token stream is unbounded in time).
+//
+// Note: singleEvents=true expands recurring series into instances, so a calendar with
+// long/unbounded recurrences returns many rows on this one bootstrap read; every
+// incremental fetch afterward is cheap. This is the standard Google sync pattern. If
+// that expansion ever proves too costly, the escape hatch is singleEvents=false (sync
+// recurring masters and expand client-side), NOT adding timeMax — a time restriction
+// forfeits the sync token entirely.
+func (c *Client) ListEventsForSync(ctx context.Context, token, calendarID string) (*ListEventsResult, error) {
+	var result ListEventsResult
+	pageToken := ""
+	for {
+		params := url.Values{}
+		params.Set("singleEvents", "true")
+		params.Set("maxResults", "2500")
+		if pageToken != "" {
+			params.Set("pageToken", pageToken)
+		}
+		u := c.BaseURL + "/calendars/" + url.PathEscape(calendarID) + "/events?" + params.Encode()
+		body, err := c.doChecked(ctx, token, "GET", u, nil)
+		if err != nil {
+			return nil, fmt.Errorf("full sync list for %s: %w", calendarID, err)
+		}
+		var resp eventsListResponse
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return nil, fmt.Errorf("decoding full sync events: %w", err)
+		}
+		result.Events = append(result.Events, resp.Items...)
+		if resp.NextPageToken == "" {
+			result.SyncToken = resp.NextSyncToken
+			break
+		}
+		pageToken = resp.NextPageToken
+	}
+	return &result, nil
+}
+
 // ListEventsByProperty fetches events matching a query (private-property filters,
 // optional time window). Pages through all results.
 func (c *Client) ListEventsByProperty(ctx context.Context, token, calendarID string, q EventQuery) ([]GCalEvent, error) {

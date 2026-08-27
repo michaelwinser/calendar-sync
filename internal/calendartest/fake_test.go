@@ -144,6 +144,86 @@ func TestWindowReadDeterministicOrder(t *testing.T) {
 	}
 }
 
+func TestListEventsForSyncEstablishesToken(t *testing.T) {
+	f := calendartest.New()
+	defer f.Close()
+	f.AddCalendar("work@x", "Work", true)
+	f.SeedEvent("work@x", ev("March", "2026-03-02T09:00:00Z", "2026-03-02T09:30:00Z"))
+	f.SeedEvent("work@x", ev("June", "2026-06-01T09:00:00Z", "2026-06-01T09:30:00Z"))
+
+	c := f.Client()
+	ctx := context.Background()
+
+	// The unrestricted bootstrap read returns ALL events and — unlike a windowed read —
+	// a usable sync token.
+	res, err := c.ListEventsForSync(ctx, tok, "work@x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Events) != 2 {
+		t.Fatalf("bootstrap read should return all events, got %d", len(res.Events))
+	}
+	if res.SyncToken == "" {
+		t.Fatal("bootstrap read must return a sync token")
+	}
+	if c := f.Counts(); c.FullSyncList != 1 || c.WindowList != 0 {
+		t.Fatalf("want one FullSyncList read, got %+v", c)
+	}
+
+	// The token works: a subsequent change shows up incrementally.
+	created, err := c.CreateEvent(ctx, tok, "work@x", ptr(ev("New", "2026-04-01T09:00:00Z", "2026-04-01T10:00:00Z")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := c.ListEventsIncremental(ctx, tok, "work@x", res.SyncToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Events) != 1 || d.Events[0].ID != created.ID {
+		t.Fatalf("incremental after bootstrap should report the new event, got %+v", d.Events)
+	}
+}
+
+func TestPagingAcrossListModes(t *testing.T) {
+	f := calendartest.New()
+	defer f.Close()
+	f.AddCalendar("work@x", "Work", true)
+	for _, d := range []string{"01", "02", "03", "04", "05"} {
+		f.SeedEvent("work@x", ev("E"+d, "2026-03-"+d+"T09:00:00Z", "2026-03-"+d+"T10:00:00Z"))
+	}
+	f.SetPageSize(2) // force ≥3 pages for 5 events
+
+	c := f.Client()
+	ctx := context.Background()
+
+	// Windowed read pages through all 5 and returns no token.
+	res, err := c.ListEvents(ctx, tok, "work@x",
+		time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Events) != 5 {
+		t.Fatalf("windowed paging should return all 5, got %d", len(res.Events))
+	}
+
+	// Bootstrap read pages through all 5 and returns a token only on the final page.
+	full, err := c.ListEventsForSync(ctx, tok, "work@x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full.Events) != 5 {
+		t.Fatalf("bootstrap paging should return all 5, got %d", len(full.Events))
+	}
+	if full.SyncToken == "" {
+		t.Fatal("bootstrap read must still yield a token after paging")
+	}
+	// A multi-page read is multiple HTTP calls: 5 events / pageSize 2 = 3 pages each.
+	if c := f.Counts(); c.WindowList != 3 || c.FullSyncList != 3 {
+		t.Fatalf("want 3 window + 3 fullsync page-requests, got %+v", c)
+	}
+}
+
 func TestPropertyFilter(t *testing.T) {
 	f := calendartest.New()
 	defer f.Close()
