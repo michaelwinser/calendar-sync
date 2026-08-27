@@ -9,9 +9,16 @@ reconciliation. This is the real fix for the Firestore read cost (today every
 15-minute pass scans the full `synced_events` collection ~3×, ≈3,848 reads regardless
 of activity).
 
-Highest-risk milestone: it changes **live production data**. It runs on a staging GCP
-project first, with a non-destructive, idempotent migration and a defined rollback
-window.
+Highest-risk milestone: it changes **live production data**. Safety comes from the
+migration being **non-destructive and idempotent** — not from a separate environment.
+This is effectively a single-user app, and a standing staging instance operating against
+real or copied calendars would add operational cost without adding protection: `copy`
+writes to *new* collections and leaves the old ones untouched, so until `delete-old` runs
+days later the old mapping is intact and is the rollback. The one thing SQLite can't
+rehearse — Firestore doc-id constraints, the 500-op commit limit, collection delete — is
+covered by the **local Firestore emulator** (`FIRESTORE_EMULATOR_HOST`), seeded from a
+prod export. The real migration then runs directly against prod, non-destructively, gated
+by a PITR snapshot + `--dry-run` + `verify`.
 
 > Status: architecture-reviewed once → **REVISE**; this revision folds in all 7
 > BLOCKING items and the advisories. Re-run the architecture review before building.
@@ -148,17 +155,20 @@ or the event was already gone (404/410). Fold in during the restructure.
   edit → fast pass → assert reads via `Store.Reads()`; delete a placeholder by hand → full
   pass repairs it → fast pass makes **zero** writes; recurring series (edit one instance,
   edit the series, cancel one instance). Assert the honest read floor (~5–10/idle pass), not zero.
-- **Phase 2:** dry-run + verify against **staging Firestore seeded from a prod export**
-  (SQLite won't exercise doc-id constraints, the 500-op commit limit, or collection delete);
-  idempotent re-run; collision handling.
+- **Phase 2:** rehearse against the **local Firestore emulator seeded from a prod export**
+  (SQLite won't exercise doc-id constraints, the 500-op commit limit, or collection delete):
+  dry-run + verify, idempotent re-run, collision handling. Then run for real against prod
+  non-destructively (snapshot → dry-run → copy → verify → read-switch → delayed delete-old).
 - **Phase 1/4:** `./dev ci` green, no behaviour change; a test that a failed Google delete
   leaves the record intact.
 
 ## Risks & sequencing
-Phase 0 (de-risk) → Phase 1 (structural, safe) → Phase 2 (data, staged, non-destructive) →
+Phase 0 (de-risk) → Phase 1 (structural, safe) → Phase 2 (data, non-destructive) →
 Phase 3 (behaviour, needs the key + harness) → Phase 4 (fold-in). **Never combine the data
-migration and the behaviour change in one deploy.** Do Phase 2 against a staging GCP
-project + Firestore first; the read-count instrumentation confirms Phase 3's drop.
+migration and the behaviour change in one deploy.** Rehearse Phase 2 against the local
+Firestore emulator, then run it against prod non-destructively (old collection is the
+rollback until `delete-old`); deploy Phase 3 to prod and let the read-count instrumentation
+confirm the drop. No standing staging instance.
 
 ## Deferred / out of scope
 - Moving the mapping off Firestore entirely (derive from hub placeholders) — a more radical
