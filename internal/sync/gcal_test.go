@@ -117,7 +117,7 @@ func TestBuildPlaceholder(t *testing.T) {
 		},
 	}
 
-	p := BuildPlaceholder(source, "work@example.com", PlaceholderOptions{})
+	p := BuildPlaceholder(source, "work@example.com", source.ID, "2026-04-01T10:00:00Z", PlaceholderOptions{})
 
 	// Fields copied
 	if p.Summary != "Team Standup" {
@@ -151,6 +151,12 @@ func TestBuildPlaceholder(t *testing.T) {
 	if p.ExtendedProperties.Private["sourceEventId"] != "src-123" {
 		t.Error("wrong sourceEventId")
 	}
+	if p.ExtendedProperties.Private["sourceUpdated"] != "2026-04-01T10:00:00Z" {
+		t.Errorf("wrong sourceUpdated stamp: %q", p.ExtendedProperties.Private["sourceUpdated"])
+	}
+	if SourceUpdated(p) != "2026-04-01T10:00:00Z" {
+		t.Errorf("SourceUpdated() = %q", SourceUpdated(p))
+	}
 
 	// Attendees in description, not as attendees
 	if len(p.Attendees) != 0 {
@@ -174,7 +180,7 @@ func TestBuildPlaceholder(t *testing.T) {
 
 func TestBuildPlaceholderWithEmoji(t *testing.T) {
 	source := GCalEvent{ID: "src-1", Summary: "Meeting"}
-	p := BuildPlaceholder(source, "cal@x.com", PlaceholderOptions{EmojiPrefix: "🔄"})
+	p := BuildPlaceholder(source, "cal@x.com", source.ID, source.Updated, PlaceholderOptions{EmojiPrefix: "🔄"})
 	if p.Summary != "🔄 Meeting" {
 		t.Errorf("Summary = %q, want %q", p.Summary, "🔄 Meeting")
 	}
@@ -182,7 +188,7 @@ func TestBuildPlaceholderWithEmoji(t *testing.T) {
 
 func TestBuildPlaceholderWithColor(t *testing.T) {
 	source := GCalEvent{ID: "src-1", Summary: "Meeting"}
-	p := BuildPlaceholder(source, "cal@x.com", PlaceholderOptions{ColorID: "5"})
+	p := BuildPlaceholder(source, "cal@x.com", source.ID, source.Updated, PlaceholderOptions{ColorID: "5"})
 	if p.ColorID != "5" {
 		t.Errorf("ColorID = %q, want %q", p.ColorID, "5")
 	}
@@ -190,7 +196,7 @@ func TestBuildPlaceholderWithColor(t *testing.T) {
 
 func TestBuildPlaceholderNoOptions(t *testing.T) {
 	source := GCalEvent{ID: "src-1", Summary: "Meeting"}
-	p := BuildPlaceholder(source, "cal@x.com", PlaceholderOptions{})
+	p := BuildPlaceholder(source, "cal@x.com", source.ID, source.Updated, PlaceholderOptions{})
 	if p.Summary != "Meeting" {
 		t.Errorf("Summary = %q, want %q", p.Summary, "Meeting")
 	}
@@ -206,7 +212,7 @@ func TestBuildPlaceholderNoAttendees(t *testing.T) {
 		Description: "Deep work",
 	}
 
-	p := BuildPlaceholder(source, "cal@x.com", PlaceholderOptions{})
+	p := BuildPlaceholder(source, "cal@x.com", source.ID, source.Updated, PlaceholderOptions{})
 
 	if p.Description != "Deep work" {
 		t.Errorf("Description = %q, want %q", p.Description, "Deep work")

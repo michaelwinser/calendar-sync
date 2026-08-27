@@ -69,14 +69,31 @@ func SourceEventID(event GCalEvent) string {
 	return event.ExtendedProperties.Private["sourceEventId"]
 }
 
+// SourceUpdated returns the source event's Updated timestamp stamped on a placeholder.
+// This is the single change-detection value both sync directions (and both two-tier
+// tiers) compare against, so an unchanged source event produces no rewrites regardless
+// of the placeholder's own Updated. Empty for placeholders created before this stamp
+// existed (they get one on the next update).
+func SourceUpdated(event GCalEvent) string {
+	if event.ExtendedProperties == nil {
+		return ""
+	}
+	return event.ExtendedProperties.Private["sourceUpdated"]
+}
+
 // PlaceholderOptions configures how a placeholder event looks on the target calendar.
 type PlaceholderOptions struct {
 	EmojiPrefix string // prepended to title, e.g. "🔄 "
 	ColorID     string // Google Calendar colorId (1-11), empty for default
 }
 
-// BuildPlaceholder creates a placeholder event from a source event.
-func BuildPlaceholder(source GCalEvent, sourceCalID string, opts PlaceholderOptions) GCalEvent {
+// BuildPlaceholder creates a placeholder event from a source event. sourceEventID and
+// sourceUpdated are the ORIGIN event's id and Updated timestamp — passed explicitly
+// because outbound builds from the hub placeholder, whose own .ID is not the origin's
+// (stamping source.ID there is the bug that broke outbound adoption). Both are stamped
+// into the placeholder so identity and change detection stay consistent across
+// directions and tiers (see SourceEventID / SourceUpdated).
+func BuildPlaceholder(source GCalEvent, sourceCalID, sourceEventID, sourceUpdated string, opts PlaceholderOptions) GCalEvent {
 	desc := source.Description
 	if len(source.Attendees) > 0 {
 		if desc != "" {
@@ -104,7 +121,8 @@ func BuildPlaceholder(source GCalEvent, sourceCalID string, opts PlaceholderOpti
 			Private: map[string]string{
 				"calendarSyncMarker": "v1",
 				"sourceCalendarId":   sourceCalID,
-				"sourceEventId":      source.ID,
+				"sourceEventId":      sourceEventID,
+				"sourceUpdated":      sourceUpdated,
 			},
 		},
 	}

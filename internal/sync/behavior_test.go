@@ -264,6 +264,82 @@ func TestCreateSyncedEventPointGet(t *testing.T) {
 	}
 }
 
+// TestTwoSourceOutboundConvergence exercises outbound propagation and the BLOCKING-4
+// comparison key: an event on source A becomes a hub placeholder and propagates to
+// source B (not back to A), and a second unchanged pass writes nothing — the outbound
+// placeholder is compared by the source's stamped Updated, not the hub placeholder's own.
+func TestTwoSourceOutboundConvergence(t *testing.T) {
+	const (
+		userID = "u1"
+		hubID  = "hub@x"
+		aID    = "a@x"
+		bID    = "b@x"
+		token  = "tok"
+	)
+	ctx := context.Background()
+	store := newTestStore(t)
+	if _, err := store.SaveConfig(userID, SaveConfigInput{HubCalendarID: hubID, HubCalendarName: "Hub", SyncWindowWeeks: 8, SyncIntervalMinutes: 15}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReconcileSources(userID, []SourceCalendarInput{{CalendarID: aID, CalendarName: "A"}, {CalendarID: bID, CalendarName: "B"}}); err != nil {
+		t.Fatal(err)
+	}
+	reload := func() (*SyncConfig, []SourceCalendar) {
+		cfg, _ := store.GetConfig(userID)
+		src, _ := store.GetSources(userID)
+		return cfg, src
+	}
+
+	fake := calendartest.New()
+	defer fake.Close()
+	fake.AddCalendar(hubID, "Hub", false)
+	fake.AddCalendar(aID, "A", false)
+	fake.AddCalendar(bID, "B", false)
+	start := time.Now().Add(48 * time.Hour).UTC()
+	fake.SeedEvent(aID, calendar.GCalEvent{
+		Summary: "Meeting",
+		Start:   calendar.EventTime{DateTime: start.Format(time.RFC3339)},
+		End:     calendar.EventTime{DateTime: start.Add(time.Hour).Format(time.RFC3339)},
+	})
+
+	cfg, sources := reload()
+	res, err := RunSync(ctx, fake.Client(), token, store, cfg, sources)
+	if err != nil || res.Errors != 0 {
+		t.Fatalf("pass 1: err=%v errors=%v", err, res.ErrorDetails)
+	}
+	if got := len(placeholdersOn(fake, hubID)); got != 1 {
+		t.Fatalf("hub should have 1 placeholder, got %d", got)
+	}
+	bPlaceholders := placeholdersOn(fake, bID)
+	if len(bPlaceholders) != 1 {
+		t.Fatalf("source B should have 1 propagated placeholder, got %d", len(bPlaceholders))
+	}
+	srcEv := fake.Events(aID)[0] // the seeded source event on A
+	// The outbound stamp must be the SOURCE's Updated (not the hub placeholder's own),
+	// and sourceEventId must be the origin event's id (not the hub placeholder's) — both
+	// would be wrong under the pre-3a code.
+	if got := SourceUpdated(bPlaceholders[0]); got != srcEv.Updated {
+		t.Fatalf("outbound sourceUpdated = %q, want source A's Updated %q", got, srcEv.Updated)
+	}
+	if got := SourceEventID(bPlaceholders[0]); got != srcEv.ID {
+		t.Fatalf("outbound sourceEventId = %q, want origin event %q", got, srcEv.ID)
+	}
+	if got := len(placeholdersOn(fake, aID)); got != 0 {
+		t.Fatalf("source A (the origin) must not get a placeholder, got %d", got)
+	}
+
+	// Unchanged second pass converges — no outbound churn.
+	cfg, sources = reload()
+	res2, err := RunSync(ctx, fake.Client(), token, store, cfg, sources)
+	if err != nil || res2.Errors != 0 {
+		t.Fatalf("pass 2: err=%v errors=%v", err, res2.ErrorDetails)
+	}
+	if res2.Created != 0 || res2.Updated != 0 || res2.Deleted != 0 {
+		t.Fatalf("two-source pass should converge, got created=%d updated=%d deleted=%d",
+			res2.Created, res2.Updated, res2.Deleted)
+	}
+}
+
 func placeholdersOn(fake *calendartest.Fake, calID string) []calendar.GCalEvent {
 	var out []calendar.GCalEvent
 	for _, ev := range fake.Events(calID) {

@@ -278,8 +278,9 @@ func syncSourceToHub(ctx context.Context, cal *calendar.Client, token string, st
 			continue
 		}
 
-		// Inbound to hub: no per-calendar visual options
-		placeholder := BuildPlaceholder(event, source.CalendarID, PlaceholderOptions{})
+		// Inbound to hub: no per-calendar visual options. Stamp the source event's
+		// Updated so outbound and the two-tier fast pass compare the same value.
+		placeholder := BuildPlaceholder(event, source.CalendarID, event.ID, event.Updated, PlaceholderOptions{})
 		existingSynced, hasSynced := syncedBySourceID[event.ID]
 
 		if !hasSynced {
@@ -494,12 +495,16 @@ func syncOutboundToSource(ctx context.Context, cal *calendar.Client, token strin
 		}
 
 		key := he.sourceCalID + "|" + he.sourceEventID
-		// Outbound to source calendar: apply target calendar's visual options
+		// Outbound to source calendar: apply target calendar's visual options. The
+		// change-detection value is the source's Updated as stamped on the hub
+		// placeholder — NOT he.event.Updated (the hub placeholder's own timestamp, which
+		// changes every time the hub placeholder is rewritten and would cause churn).
+		srcUpdated := SourceUpdated(he.event)
 		opts := PlaceholderOptions{
 			EmojiPrefix: source.EmojiPrefix,
 			ColorID:     source.ColorID,
 		}
-		placeholder := BuildPlaceholder(he.event, he.sourceCalID, opts)
+		placeholder := BuildPlaceholder(he.event, he.sourceCalID, he.sourceEventID, srcUpdated, opts)
 
 		existingSe, hasSynced := syncedByKey[key]
 
@@ -512,7 +517,7 @@ func syncOutboundToSource(ctx context.Context, cal *calendar.Client, token strin
 					SourceEventID:    he.sourceEventID,
 					TargetCalendarID: targetCalID,
 					TargetEventID:    existingP.ID,
-					SourceUpdated:    he.event.Updated,
+					SourceUpdated:    srcUpdated,
 				})
 				if err != nil {
 					result.addError("failed to adopt outbound placeholder: %v", err)
@@ -542,15 +547,19 @@ func syncOutboundToSource(ctx context.Context, cal *calendar.Client, token strin
 				SourceEventID:    he.sourceEventID,
 				TargetCalendarID: targetCalID,
 				TargetEventID:    created.ID,
-				SourceUpdated:    he.event.Updated,
+				SourceUpdated:    srcUpdated,
 			})
 			if err != nil {
 				result.addError("failed to store outbound synced event: %v", err)
 				continue
 			}
 			result.Created++
-		} else if he.event.Updated > existingSe.SourceUpdated {
-			// UPDATE outbound placeholder
+		} else if srcUpdated != "" && srcUpdated != existingSe.SourceUpdated {
+			// UPDATE outbound placeholder. Compare by inequality, not ">": on the M8
+			// transition, existing rows hold the old semantics (the hub placeholder's
+			// Updated, always ≥ the source's), so ">" would never fire; "!=" rewrites the
+			// row once with srcUpdated and then converges. The srcUpdated != "" guard
+			// keeps pre-stamp hub placeholders a no-op until inbound re-stamps them.
 			if dryRun {
 				result.Updated++
 				delete(syncedByKey, key)
@@ -569,7 +578,7 @@ func syncOutboundToSource(ctx context.Context, cal *calendar.Client, token strin
 				result.addError("failed to update outbound placeholder on %s: %v", source.CalendarName, err)
 				continue
 			}
-			existingSe.SourceUpdated = he.event.Updated
+			existingSe.SourceUpdated = srcUpdated
 			if err := store.UpdateSyncedEvent(&existingSe); err != nil {
 				log.Printf("failed to update outbound synced event: %v", err)
 			}
