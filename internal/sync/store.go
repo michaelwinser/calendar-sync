@@ -49,8 +49,10 @@ type SourceCalendar struct {
 }
 
 // SyncedEvent tracks the mapping between a source event and a placeholder event.
-// Lookup is via Where("source_calendar_id", ...).All() with in-memory filtering
-// on source_event_id. Compound indexes are not supported by appbase store.
+// Since M8, ID is the deterministic SyncedEventKey (a hash of the userID/sourceCal/
+// sourceEvent/targetCal 4-tuple), so a mapping is point-fetched with GetSyncedEventByKey
+// (one Get) instead of a scan. The legacy per-source Where("source_calendar_id",...).All()
+// scan (GetSyncedEvents) remains for the full-pass reconciliation paths.
 type SyncedEvent struct {
 	ID               string `json:"id"               store:"id,pk"`
 	UserID           string `json:"userId"            store:"user_id,index"`
@@ -103,11 +105,14 @@ func NewStore(d *db.DB) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	sources, err := store.NewCollection[SourceCalendar](d, "source_calendars")
+	// M8 read-switch: the sync module owns module-namespaced collections, and
+	// synced_events is re-keyed by SyncedEventKey. Deploy this only AFTER `migrate copy`
+	// has populated these collections (see docs/M8-migration-runbook.md).
+	sources, err := store.NewCollection[SourceCalendar](d, newSourceCalendars)
 	if err != nil {
 		return nil, err
 	}
-	syncedEvents, err := store.NewCollection[SyncedEvent](d, "synced_events")
+	syncedEvents, err := store.NewCollection[SyncedEvent](d, newSyncedEvents)
 	if err != nil {
 		return nil, err
 	}
@@ -322,12 +327,27 @@ func (s *Store) GetSyncedEventsForUser(userID string) ([]SyncedEvent, error) {
 	return all, err
 }
 
-// CreateSyncedEvent inserts a new synced event mapping.
+// CreateSyncedEvent inserts a synced event mapping, keyed by its deterministic
+// point-lookup key (SyncedEventKey) rather than a random uuid — this is what lets the
+// mapping be point-fetched with GetSyncedEventByKey instead of a full-collection scan.
+// Plain Create (not the migration's upsert): on Firestore it's Doc.Set, so re-creating
+// the same 4-tuple is idempotent for free; the real sync flow only creates when no
+// mapping was loaded, so it never double-fires the SQLite INSERT. Avoids a wasted read
+// on the hot path — the whole point of this milestone.
 func (s *Store) CreateSyncedEvent(se *SyncedEvent) error {
-	se.ID = uuid.New().String()
-	se.CreatedAt = time.Now().UTC().Format(time.RFC3339)
-	se.UpdatedAt = se.CreatedAt
+	se.ID = SyncedEventKey(se.UserID, se.SourceCalendarID, se.SourceEventID, se.TargetCalendarID)
+	now := time.Now().UTC().Format(time.RFC3339)
+	se.CreatedAt = now
+	se.UpdatedAt = now
 	return s.SyncedEvents.Create(se)
+}
+
+// GetSyncedEventByKey fetches a mapping with a single point Get on its deterministic
+// key, or (nil, nil) if none exists. This is the O(1) lookup two-tier sync uses in
+// place of scanning the whole collection.
+func (s *Store) GetSyncedEventByKey(userID, sourceCalID, sourceEventID, targetCalID string) (*SyncedEvent, error) {
+	s.addReads(1)
+	return s.SyncedEvents.Get(SyncedEventKey(userID, sourceCalID, sourceEventID, targetCalID))
 }
 
 // UpdateSyncedEvent updates an existing synced event mapping.
