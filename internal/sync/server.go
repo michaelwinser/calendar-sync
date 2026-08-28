@@ -170,6 +170,13 @@ func (s *Server) PutConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Force a full reconciliation on the next nudge: a changed hub/sources/window means
+	// the fast pass's per-event deltas aren't enough (e.g. a new source needs a full
+	// initial sync, a narrowed window needs orphan cleanup).
+	if err := s.Store.SetLastFullSyncAt(userID, ""); err != nil {
+		log.Printf("failed to force full pass after config change: %v", err)
+	}
+
 	resp := configResponse{
 		HubCalendarID:       cfg.HubCalendarID,
 		HubCalendarName:     cfg.HubCalendarName,
@@ -354,8 +361,11 @@ func (s *Server) NudgeSync(w http.ResponseWriter, r *http.Request) {
 		}
 		// Allow zero sources — cleanup phase needs to run
 
+		// Run a cheap fast pass unless a full reconciliation is due (or was forced by a
+		// config change). The full pass re-establishes sync tokens and slides the window.
 		syncDays := cfg.SyncWindowWeeks * 7
-		if _, err := RunSyncWithDays(r.Context(), s.Cal, token, s.Store, &cfg, sources, syncDays); err != nil {
+		opts := SyncOptions{SyncDays: syncDays, Fast: !FullPassDue(&cfg, now)}
+		if _, err := RunSyncWithOptions(r.Context(), s.Cal, token, s.Store, &cfg, sources, opts); err != nil {
 			msg := fmt.Sprintf("user %s: sync failed: %v", cfg.UserID, err)
 			log.Printf("nudge: %s", msg)
 			errs = append(errs, msg)

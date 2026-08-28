@@ -31,8 +31,12 @@ type SyncConfig struct {
 	SyncIntervalMinutes int    `json:"syncIntervalMinutes" store:"sync_interval_minutes"`
 	RefreshToken        string `json:"-"                   store:"refresh_token"`
 	LastSyncAt          string `json:"-"                   store:"last_sync_at"`
-	CreatedAt           string `json:"createdAt"           store:"created_at"`
-	UpdatedAt           string `json:"updatedAt"           store:"updated_at"`
+	// LastFullSyncAt is when the last full reconciliation pass ran. The nudge runs a
+	// fast (incremental) pass unless this is empty or stale, in which case it runs a
+	// full pass. PutConfig clears it so a config change forces a full pass next.
+	LastFullSyncAt string `json:"-"          store:"last_full_sync_at"`
+	CreatedAt      string `json:"createdAt"  store:"created_at"`
+	UpdatedAt      string `json:"updatedAt"  store:"updated_at"`
 }
 
 // SourceCalendar represents a calendar selected for synchronization.
@@ -76,6 +80,7 @@ type SyncLog struct {
 	Deleted      int    `json:"deleted"     store:"deleted"`
 	Errors       int    `json:"errors"      store:"errors"`
 	Status       string `json:"status"      store:"status"`
+	Kind         string `json:"kind"        store:"kind"` // "full" or "fast"
 	ErrorMsg     string `json:"errorMsg"    store:"error_msg"`
 	ErrorDetails string `json:"errorDetails" store:"error_details"` // JSON: []string of error messages
 	Details      string `json:"details"     store:"details"`        // JSON: map[calendarName]{created,updated,deleted}
@@ -302,6 +307,18 @@ func (s *Store) UpdateSourceSyncToken(id, syncToken string) error {
 	return s.Sources.Update(id, src)
 }
 
+// SetLastFullSyncAt stamps (t=="" clears) the user's last-full-pass time. Clearing it
+// forces the next nudge to run a full pass (used by PutConfig on a config change).
+func (s *Store) SetLastFullSyncAt(userID, t string) error {
+	cfg, err := s.GetConfig(userID)
+	if err != nil || cfg == nil {
+		return err
+	}
+	cfg.LastFullSyncAt = t
+	cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return s.Configs.Update(cfg.ID, cfg)
+}
+
 // GetSyncedEvents returns all synced event mappings for a source→target pair.
 func (s *Store) GetSyncedEvents(userID, sourceCalID, targetCalID string) ([]SyncedEvent, error) {
 	all, err := s.SyncedEvents.Where("source_calendar_id", "==", sourceCalID).All()
@@ -370,6 +387,12 @@ func (s *Store) CreateSyncLog(log *SyncLog) error {
 // UpdateSyncLog updates an existing sync log entry.
 func (s *Store) UpdateSyncLog(log *SyncLog) error {
 	return s.SyncLogs.Update(log.ID, log)
+}
+
+// DeleteSyncLog removes a sync log entry. The fast pass uses it to drop the running row
+// it created when the pass turned out to be a no-op (heartbeat via LastSyncAt instead).
+func (s *Store) DeleteSyncLog(id string) error {
+	return s.SyncLogs.Delete(id)
 }
 
 // GetRecentSyncLogs returns a user's most recent sync logs, newest first, up to

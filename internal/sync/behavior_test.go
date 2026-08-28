@@ -104,23 +104,26 @@ func TestFullSyncCreatesPlaceholderAndConverges(t *testing.T) {
 		t.Fatalf("second pass changed the hub placeholder set")
 	}
 
-	// Call-shape baseline that documents today's cost and what Phase 3 must change: the
-	// idle pass re-reads the FULL window per source and never goes incremental, because
-	// a windowed events.list yields no sync token from Google (so SyncToken stays empty
-	// and the incremental branch is dead code). This full re-read every pass is the
-	// Firestore/Google cost the two-tier work targets.
+	// The full pass now does a token-establishing ListEventsForSync per source (an
+	// unrestricted read, counted as FullSyncList) rather than a windowed read, and never
+	// goes incremental (that's the fast pass's job). It still scans the Firestore mapping
+	// — the full pass is the reconciliation backstop; the fast pass is where reads drop.
 	counts := fake.Counts()
 	if counts.Incremental != 0 {
-		t.Fatalf("second pass unexpectedly went incremental (no token should exist yet), counts=%+v", counts)
+		t.Fatalf("full pass should not go incremental, counts=%+v", counts)
 	}
-	if counts.WindowList != len(sources) {
-		t.Fatalf("second pass should re-read the full window once per source (%d), counts=%+v", len(sources), counts)
+	if counts.FullSyncList != len(sources) {
+		t.Fatalf("full pass should do one token-establishing read per source (%d), counts=%+v", len(sources), counts)
 	}
-	// It also scans the Firestore mapping on this idle pass — exactly the cost M8
-	// Phase 3 (two-tier sync) removes.
 	if store.Reads() <= readsBefore {
-		t.Fatalf("expected the idle pass to still read the mapping (reads went %d→%d)",
-			readsBefore, store.Reads())
+		t.Fatalf("expected the full pass to read the mapping (reads went %d→%d)", readsBefore, store.Reads())
+	}
+
+	// The full pass established a sync token on each source (the fast pass will use it).
+	for _, s := range sources {
+		if s.SyncToken == "" {
+			t.Fatalf("full pass should establish a sync token on source %s", s.CalendarID)
+		}
 	}
 }
 
@@ -337,6 +340,322 @@ func TestTwoSourceOutboundConvergence(t *testing.T) {
 	if res2.Created != 0 || res2.Updated != 0 || res2.Deleted != 0 {
 		t.Fatalf("two-source pass should converge, got created=%d updated=%d deleted=%d",
 			res2.Created, res2.Updated, res2.Deleted)
+	}
+}
+
+// fastSyncSetup builds a store+fake with the given source calendars and returns helpers.
+// Callers run the first full pass themselves (it establishes the sync tokens the fast
+// pass needs).
+func fastSyncSetup(t *testing.T, sources ...string) (*Store, *calendartest.Fake, func() (*SyncConfig, []SourceCalendar)) {
+	t.Helper()
+	const (
+		userID = "u1"
+		hubID  = "hub@x"
+		token  = "tok"
+	)
+	store := newTestStore(t)
+	if _, err := store.SaveConfig(userID, SaveConfigInput{HubCalendarID: hubID, HubCalendarName: "Hub", SyncWindowWeeks: 8, SyncIntervalMinutes: 15}); err != nil {
+		t.Fatal(err)
+	}
+	inputs := make([]SourceCalendarInput, len(sources))
+	for i, s := range sources {
+		inputs[i] = SourceCalendarInput{CalendarID: s, CalendarName: s}
+	}
+	if _, err := store.ReconcileSources(userID, inputs); err != nil {
+		t.Fatal(err)
+	}
+	fake := calendartest.New()
+	t.Cleanup(fake.Close)
+	fake.AddCalendar(hubID, "Hub", false)
+	for _, s := range sources {
+		fake.AddCalendar(s, s, false)
+	}
+	reload := func() (*SyncConfig, []SourceCalendar) {
+		cfg, _ := store.GetConfig(userID)
+		src, _ := store.GetSources(userID)
+		return cfg, src
+	}
+	return store, fake, reload
+}
+
+func TestFastPassConvergesAndAppliesEdit(t *testing.T) {
+	const (
+		hubID, aID, token = "hub@x", "a@x", "tok"
+	)
+	ctx := context.Background()
+	store, fake, reload := fastSyncSetup(t, aID)
+	start := time.Now().Add(48 * time.Hour).UTC()
+	evID := fake.SeedEvent(aID, calendar.GCalEvent{
+		Summary: "Standup",
+		Start:   calendar.EventTime{DateTime: start.Format(time.RFC3339)},
+		End:     calendar.EventTime{DateTime: start.Add(30 * time.Minute).Format(time.RFC3339)},
+	})
+
+	// Full pass: establishes the token and creates the hub placeholder.
+	cfg, sources := reload()
+	if _, err := RunSync(ctx, fake.Client(), token, store, cfg, sources); err != nil {
+		t.Fatalf("full pass: %v", err)
+	}
+	if len(placeholdersOn(fake, hubID)) != 1 {
+		t.Fatal("full pass should have created the hub placeholder")
+	}
+
+	// Fast pass, no change: zero writes, and it goes incremental (no full scan).
+	cfg, sources = reload()
+	fake.ResetCounts()
+	res, err := RunSyncWithOptions(ctx, fake.Client(), token, store, cfg, sources, SyncOptions{Fast: true})
+	if err != nil || res.Errors != 0 {
+		t.Fatalf("fast no-op: err=%v errors=%v", err, res.ErrorDetails)
+	}
+	if res.Created+res.Updated+res.Deleted != 0 {
+		t.Fatalf("fast no-op should write nothing, got %+v", res)
+	}
+	c := fake.Counts()
+	if c.Incremental < 1 {
+		t.Fatalf("fast pass should use the sync token, counts=%+v", c)
+	}
+	if c.FullSyncList != 0 || c.WindowList != 0 {
+		t.Fatalf("fast pass must not do a full/windowed re-list, counts=%+v", c)
+	}
+
+	// Edit the source event → fast pass updates exactly the one placeholder.
+	fake.SeedEvent(aID, calendar.GCalEvent{
+		ID:      evID,
+		Summary: "Standup (moved)",
+		Start:   calendar.EventTime{DateTime: start.Format(time.RFC3339)},
+		End:     calendar.EventTime{DateTime: start.Add(30 * time.Minute).Format(time.RFC3339)},
+	})
+	cfg, sources = reload()
+	res2, err := RunSyncWithOptions(ctx, fake.Client(), token, store, cfg, sources, SyncOptions{Fast: true})
+	if err != nil || res2.Errors != 0 {
+		t.Fatalf("fast edit: err=%v errors=%v", err, res2.ErrorDetails)
+	}
+	if res2.Updated != 1 || res2.Created != 0 || res2.Deleted != 0 {
+		t.Fatalf("fast pass should apply exactly one update, got %+v", res2)
+	}
+	if got := placeholdersOn(fake, hubID)[0].Summary; got != "Standup (moved)" {
+		t.Fatalf("hub placeholder not updated, summary=%q", got)
+	}
+
+	// A full pass now converges — the fast pass already recorded the new state.
+	cfg, sources = reload()
+	res3, err := RunSync(ctx, fake.Client(), token, store, cfg, sources)
+	if err != nil || res3.Errors != 0 {
+		t.Fatalf("converging full pass: err=%v errors=%v", err, res3.ErrorDetails)
+	}
+	if res3.Created+res3.Updated+res3.Deleted != 0 {
+		t.Fatalf("full pass after fast should converge, got %+v", res3)
+	}
+}
+
+func TestFastPassDeletesRemovedEvent(t *testing.T) {
+	const (
+		hubID, aID, token = "hub@x", "a@x", "tok"
+	)
+	ctx := context.Background()
+	store, fake, reload := fastSyncSetup(t, aID)
+	start := time.Now().Add(48 * time.Hour).UTC()
+	evID := fake.SeedEvent(aID, calendar.GCalEvent{
+		Summary: "Doomed",
+		Start:   calendar.EventTime{DateTime: start.Format(time.RFC3339)},
+		End:     calendar.EventTime{DateTime: start.Add(time.Hour).Format(time.RFC3339)},
+	})
+	cfg, sources := reload()
+	if _, err := RunSync(ctx, fake.Client(), token, store, cfg, sources); err != nil {
+		t.Fatalf("full pass: %v", err)
+	}
+
+	// Delete the source event → the fast pass removes the placeholder + mapping.
+	if err := fake.Client().DeleteEvent(ctx, token, aID, evID); err != nil {
+		t.Fatal(err)
+	}
+	cfg, sources = reload()
+	res, err := RunSyncWithOptions(ctx, fake.Client(), token, store, cfg, sources, SyncOptions{Fast: true})
+	if err != nil || res.Errors != 0 {
+		t.Fatalf("fast delete: err=%v errors=%v", err, res.ErrorDetails)
+	}
+	if res.Deleted != 1 {
+		t.Fatalf("fast pass should delete the placeholder, got %+v", res)
+	}
+	if len(placeholdersOn(fake, hubID)) != 0 {
+		t.Fatal("hub placeholder should be gone")
+	}
+	synced, _ := store.GetSyncedEventsForUser("u1")
+	if len(synced) != 0 {
+		t.Fatalf("mapping should be removed, got %d", len(synced))
+	}
+}
+
+func TestFastPassOutboundPropagation(t *testing.T) {
+	const (
+		hubID, aID, bID, token = "hub@x", "a@x", "b@x", "tok"
+	)
+	ctx := context.Background()
+	store, fake, reload := fastSyncSetup(t, aID, bID)
+	start := time.Now().Add(48 * time.Hour).UTC()
+	evID := fake.SeedEvent(aID, calendar.GCalEvent{
+		Summary: "Meeting",
+		Start:   calendar.EventTime{DateTime: start.Format(time.RFC3339)},
+		End:     calendar.EventTime{DateTime: start.Add(time.Hour).Format(time.RFC3339)},
+	})
+	cfg, sources := reload()
+	if _, err := RunSync(ctx, fake.Client(), token, store, cfg, sources); err != nil {
+		t.Fatalf("full pass: %v", err)
+	}
+	if len(placeholdersOn(fake, bID)) != 1 {
+		t.Fatal("full pass should propagate a placeholder to B")
+	}
+
+	// Edit on A → fast pass updates both the hub and B's outbound placeholder.
+	fake.SeedEvent(aID, calendar.GCalEvent{
+		ID:      evID,
+		Summary: "Meeting (updated)",
+		Start:   calendar.EventTime{DateTime: start.Format(time.RFC3339)},
+		End:     calendar.EventTime{DateTime: start.Add(time.Hour).Format(time.RFC3339)},
+	})
+	cfg, sources = reload()
+	res, err := RunSyncWithOptions(ctx, fake.Client(), token, store, cfg, sources, SyncOptions{Fast: true})
+	if err != nil || res.Errors != 0 {
+		t.Fatalf("fast edit: err=%v errors=%v", err, res.ErrorDetails)
+	}
+	if res.Updated != 2 { // hub + B
+		t.Fatalf("fast pass should update hub and B, got %+v", res)
+	}
+	if got := placeholdersOn(fake, bID)[0].Summary; got != "Meeting (updated)" {
+		t.Fatalf("B's placeholder not updated, summary=%q", got)
+	}
+	if got := len(placeholdersOn(fake, aID)); got != 0 {
+		t.Fatalf("A (origin) must not get a placeholder, got %d", got)
+	}
+}
+
+// TestFastPassWithoutTokenRunsFullPass covers the MUST-FIX guard: a fast pass on a
+// source that has no sync token must delegate to a full pass (which establishes the
+// token and reconciles) rather than replay the whole calendar through the per-event path.
+func TestFastPassWithoutTokenRunsFullPass(t *testing.T) {
+	const (
+		hubID, aID, token = "hub@x", "a@x", "tok"
+	)
+	ctx := context.Background()
+	store, fake, reload := fastSyncSetup(t, aID)
+	start := time.Now().Add(48 * time.Hour).UTC()
+	fake.SeedEvent(aID, calendar.GCalEvent{
+		Summary: "E",
+		Start:   calendar.EventTime{DateTime: start.Format(time.RFC3339)},
+		End:     calendar.EventTime{DateTime: start.Add(time.Hour).Format(time.RFC3339)},
+	})
+
+	// No full pass has run, so the source has no token. A fast pass must promote to full.
+	cfg, sources := reload()
+	fake.ResetCounts()
+	res, err := RunSyncWithOptions(ctx, fake.Client(), token, store, cfg, sources, SyncOptions{Fast: true})
+	if err != nil || res.Errors != 0 {
+		t.Fatalf("promoted pass: err=%v errors=%v", err, res.ErrorDetails)
+	}
+	if res.Created != 1 {
+		t.Fatalf("promoted full pass should create the placeholder, got %+v", res)
+	}
+	if c := fake.Counts(); c.FullSyncList < 1 || c.Incremental != 0 {
+		t.Fatalf("expected a full-pass token read, not incremental, counts=%+v", c)
+	}
+	if src, _ := store.GetSources("u1"); src[0].SyncToken == "" {
+		t.Fatal("the promoted full pass should have established the sync token")
+	}
+}
+
+// TestConfigChangeForcesFullPass covers the scheduling wiring: a completed full pass makes
+// the user not-due, and clearing LastFullSyncAt (what PutConfig does on a config change)
+// makes them due again.
+func TestConfigChangeForcesFullPass(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.SaveConfig("u1", SaveConfigInput{HubCalendarID: "hub@x", SyncWindowWeeks: 8}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := store.SetLastFullSyncAt("u1", now.Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := store.GetConfig("u1")
+	if FullPassDue(cfg, now) {
+		t.Fatal("right after a full pass, not due")
+	}
+	// A config change clears it.
+	if err := store.SetLastFullSyncAt("u1", ""); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ = store.GetConfig("u1")
+	if cfg.LastFullSyncAt != "" {
+		t.Fatalf("clear failed, LastFullSyncAt=%q", cfg.LastFullSyncAt)
+	}
+	if !FullPassDue(cfg, now) {
+		t.Fatal("after a config change, a full pass must be due")
+	}
+}
+
+func TestFullPassDue(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	if !FullPassDue(&SyncConfig{LastFullSyncAt: ""}, now) {
+		t.Error("no prior full pass → due")
+	}
+	if FullPassDue(&SyncConfig{LastFullSyncAt: now.Add(-1 * time.Hour).Format(time.RFC3339)}, now) {
+		t.Error("recent full pass → not due")
+	}
+	if !FullPassDue(&SyncConfig{LastFullSyncAt: now.Add(-25 * time.Hour).Format(time.RFC3339)}, now) {
+		t.Error("stale full pass → due")
+	}
+	if !FullPassDue(&SyncConfig{LastFullSyncAt: "not-a-time"}, now) {
+		t.Error("unparseable → due")
+	}
+}
+
+func TestFastPassLogging(t *testing.T) {
+	const (
+		aID, token = "a@x", "tok"
+	)
+	ctx := context.Background()
+	store, fake, reload := fastSyncSetup(t, aID)
+	start := time.Now().Add(48 * time.Hour).UTC()
+	mk := func(id, summary string) calendar.GCalEvent {
+		return calendar.GCalEvent{ID: id, Summary: summary,
+			Start: calendar.EventTime{DateTime: start.Format(time.RFC3339)},
+			End:   calendar.EventTime{DateTime: start.Add(time.Hour).Format(time.RFC3339)}}
+	}
+	evID := fake.SeedEvent(aID, mk("", "E"))
+
+	cfg, sources := reload()
+	if _, err := RunSync(ctx, fake.Client(), token, store, cfg, sources); err != nil {
+		t.Fatal(err)
+	}
+	base, _ := store.GetRecentSyncLogs("u1", 50)
+
+	// A no-op fast pass writes no durable log row (heartbeat via LastSyncAt only).
+	cfg, sources = reload()
+	if _, err := RunSyncWithOptions(ctx, fake.Client(), token, store, cfg, sources, SyncOptions{Fast: true}); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := store.GetRecentSyncLogs("u1", 50); len(after) != len(base) {
+		t.Fatalf("no-op fast pass must not add a log row, %d→%d", len(base), len(after))
+	}
+
+	// A fast pass that changes something writes exactly one Kind=fast row.
+	fake.SeedEvent(aID, mk(evID, "E edited"))
+	cfg, sources = reload()
+	if _, err := RunSyncWithOptions(ctx, fake.Client(), token, store, cfg, sources, SyncOptions{Fast: true}); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := store.GetRecentSyncLogs("u1", 50)
+	if len(after) != len(base)+1 {
+		t.Fatalf("a changing fast pass should add one log row, %d→%d", len(base), len(after))
+	}
+	// (Order isn't asserted — the full and fast rows can share an RFC3339 second.)
+	fastRows := 0
+	for _, l := range after {
+		if l.Kind == "fast" {
+			fastRows++
+		}
+	}
+	if fastRows != 1 {
+		t.Fatalf("expected exactly one Kind=fast log row, got %d", fastRows)
 	}
 }
 

@@ -59,6 +59,7 @@ func (r *SyncResult) calCounts(name string) *CalendarCounts {
 type SyncOptions struct {
 	SyncDays int  // 0 = use config default
 	DryRun   bool // if true, report what would change without writing
+	Fast     bool // if true, run the incremental fast pass instead of a full reconcile
 }
 
 // RunSync executes a full sync pass using the configured sync window.
@@ -66,13 +67,12 @@ func RunSync(ctx context.Context, cal *calendar.Client, token string, store *Sto
 	return RunSyncWithOptions(ctx, cal, token, store, config, sources, SyncOptions{})
 }
 
-// RunSyncWithDays executes a full sync pass with an explicit window in days.
-func RunSyncWithDays(ctx context.Context, cal *calendar.Client, token string, store *Store, config *SyncConfig, sources []SourceCalendar, syncDays int) (*SyncResult, error) {
-	return RunSyncWithOptions(ctx, cal, token, store, config, sources, SyncOptions{SyncDays: syncDays})
-}
-
-// RunSyncWithOptions executes a full sync pass with explicit options.
+// RunSyncWithOptions executes a sync pass with explicit options — the incremental fast
+// pass when opts.Fast, else a full reconciliation.
 func RunSyncWithOptions(ctx context.Context, cal *calendar.Client, token string, store *Store, config *SyncConfig, sources []SourceCalendar, opts SyncOptions) (*SyncResult, error) {
+	if opts.Fast {
+		return runFastPass(ctx, cal, token, store, config, sources, opts)
+	}
 	readsBefore := store.Reads()
 	syncDays := opts.SyncDays
 	if syncDays <= 0 {
@@ -97,6 +97,7 @@ func RunSyncWithOptions(ctx context.Context, cal *calendar.Client, token string,
 		UserID:    config.UserID,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 		Status:    "running",
+		Kind:      "full",
 	}
 	if !dryRun {
 		if err := store.CreateSyncLog(syncLog); err != nil {
@@ -174,6 +175,11 @@ func RunSyncWithOptions(ctx context.Context, cal *calendar.Client, token string,
 		}
 		store.UpdateSyncLog(syncLog)
 		store.UpdateLastSyncAt(config.UserID)
+		// Record that a full reconciliation ran, so the nudge can schedule fast passes
+		// until this goes stale.
+		if err := store.SetLastFullSyncAt(config.UserID, time.Now().UTC().Format(time.RFC3339)); err != nil {
+			log.Printf("failed to set last full sync time: %v", err)
+		}
 	}
 
 	prefix := "Sync completed"
@@ -204,32 +210,20 @@ func syncSourceToHub(ctx context.Context, cal *calendar.Client, token string, st
 	timeMin := now
 	timeMax := now.Add(time.Duration(syncDays) * 24 * time.Hour)
 
-	// 1. Fetch source events (incremental if syncToken available, else full)
-	var sourceEvents []GCalEvent
-	var newSyncToken string
-
-	if source.SyncToken != "" {
-		res, err := cal.ListEventsIncremental(ctx, token, source.CalendarID, source.SyncToken)
-		if errors.Is(err, ErrSyncTokenExpired) {
-			log.Printf("sync token expired for %s, falling back to full sync", source.CalendarName)
-			source.SyncToken = ""
-			// Fall through to full sync below
-		} else if err != nil {
-			return fmt.Errorf("incremental fetch from %s: %w", source.CalendarName, err)
-		} else {
-			sourceEvents = res.Events
-			newSyncToken = res.SyncToken
-		}
+	// 1. Full pass: re-list the whole calendar with ListEventsForSync to (re-)establish
+	// a sync token — a windowed events.list yields none (see calendar.ListEventsForSync)
+	// — then filter to the window client-side. This refreshes the token every full pass
+	// (so the fast pass can go incremental) and slides the window forward.
+	res, err := cal.ListEventsForSync(ctx, token, source.CalendarID)
+	if err != nil {
+		return fmt.Errorf("fetching events from %s: %w", source.CalendarName, err)
 	}
-
-	if source.SyncToken == "" {
-		// Full sync
-		res, err := cal.ListEvents(ctx, token, source.CalendarID, timeMin, timeMax)
-		if err != nil {
-			return fmt.Errorf("fetching events from %s: %w", source.CalendarName, err)
+	newSyncToken := res.SyncToken
+	var sourceEvents []GCalEvent
+	for _, e := range res.Events {
+		if eventInWindow(e, timeMin, timeMax) {
+			sourceEvents = append(sourceEvents, e)
 		}
-		sourceEvents = res.Events
-		newSyncToken = res.SyncToken
 	}
 
 	// 2. Fetch existing placeholders on hub for this source
@@ -617,10 +611,290 @@ func syncOutboundToSource(ctx context.Context, cal *calendar.Client, token strin
 	return nil
 }
 
+// fullPassInterval is how long a full reconciliation stays fresh before the nudge runs
+// another; between full passes the nudge runs cheap fast passes.
+const fullPassInterval = 24 * time.Hour
+
+// FullPassDue reports whether the user is due for a full reconciliation (vs. a fast pass):
+// when no full pass has run, its timestamp is unparseable, or it is older than
+// fullPassInterval. PutConfig clears LastFullSyncAt to force one after a config change.
+func FullPassDue(cfg *SyncConfig, now time.Time) bool {
+	if cfg.LastFullSyncAt == "" {
+		return true
+	}
+	last, err := time.Parse(time.RFC3339, cfg.LastFullSyncAt)
+	if err != nil {
+		return true
+	}
+	return now.Sub(last) >= fullPassInterval
+}
+
+// --- Two-tier fast pass ---
+
+// runFastPass is the cheap incremental tier: per source, fetch only the events changed
+// since the sync token and apply each to the hub and the other source calendars using
+// point Gets on the deterministic key — O(changes) Firestore reads, no full-collection
+// scan and no cleanup (the full pass owns reconciliation and window slide). The new token
+// is persisted for a source only if all of its changes applied cleanly.
+//
+// It delegates to the full pass for anything it can't do cheaply or safely: a dry run, or
+// any source lacking a token (never bootstrapped, or a prior expiry cleared it) — replaying
+// a whole calendar through the per-event path would cost more reads than a full reconcile.
+func runFastPass(ctx context.Context, cal *calendar.Client, token string, store *Store, config *SyncConfig, sources []SourceCalendar, opts SyncOptions) (*SyncResult, error) {
+	if opts.DryRun {
+		return RunSyncWithOptions(ctx, cal, token, store, config, sources, SyncOptions{SyncDays: opts.SyncDays, DryRun: true})
+	}
+	for i := range sources {
+		if sources[i].SyncToken == "" {
+			log.Printf("fast pass: %s has no sync token; running a full pass instead", sources[i].CalendarName)
+			return RunSyncWithOptions(ctx, cal, token, store, config, sources, SyncOptions{SyncDays: opts.SyncDays})
+		}
+	}
+
+	// Concurrent-sync guard (advisory, matching the full pass): back off if one is running,
+	// and register a running row so a full pass started meanwhile backs off too.
+	if running, err := store.GetRunningSyncLog(config.UserID); err != nil {
+		return nil, fmt.Errorf("checking running sync: %w", err)
+	} else if running != nil {
+		return nil, fmt.Errorf("a sync is already running (started %s)", running.StartedAt)
+	}
+	startedAt := time.Now().UTC()
+	syncLog := &SyncLog{
+		UserID:    config.UserID,
+		StartedAt: startedAt.Format(time.RFC3339),
+		Status:    "running",
+		Kind:      "fast",
+	}
+	if err := store.CreateSyncLog(syncLog); err != nil {
+		return nil, fmt.Errorf("creating fast sync log: %w", err)
+	}
+
+	result := &SyncResult{}
+	syncDays := opts.SyncDays
+	if syncDays <= 0 {
+		syncDays = config.SyncWindowWeeks * 7
+	}
+	if syncDays <= 0 {
+		syncDays = 56
+	}
+	timeMin := startedAt
+	timeMax := startedAt.Add(time.Duration(syncDays) * 24 * time.Hour)
+
+	for i := range sources {
+		source := &sources[i]
+		res, err := cal.ListEventsIncremental(ctx, token, source.CalendarID, source.SyncToken)
+		if errors.Is(err, ErrSyncTokenExpired) {
+			// Clear the token so the next nudge takes the full-pass branch above to
+			// re-establish it and reconcile — cheaper than replaying the whole calendar.
+			if e := store.UpdateSourceSyncToken(source.ID, ""); e != nil {
+				log.Printf("failed to clear expired token for %s: %v", source.CalendarName, e)
+			}
+			log.Printf("fast pass: token expired for %s; next pass will full-sync", source.CalendarName)
+			continue
+		}
+		if err != nil {
+			result.addError("fast pass fetch from %s: %v", source.CalendarName, err)
+			continue
+		}
+		errsBefore := result.Errors
+		c0, u0, d0 := result.Created, result.Updated, result.Deleted
+		for _, e := range res.Events {
+			applyEventFastPath(ctx, cal, token, store, config, source.CalendarID, e, sources, timeMin, timeMax, result)
+		}
+		cc := result.calCounts(source.CalendarName)
+		cc.Created += result.Created - c0
+		cc.Updated += result.Updated - u0
+		cc.Deleted += result.Deleted - d0
+		// Persist the new token only if every change for this source applied cleanly —
+		// else keep the old token so the next pass re-reads the same delta.
+		if result.Errors == errsBefore && res.SyncToken != "" {
+			if err := store.UpdateSourceSyncToken(source.ID, res.SyncToken); err != nil {
+				log.Printf("failed to persist sync token for %s: %v", source.CalendarName, err)
+			}
+		}
+	}
+
+	// Always heartbeat. Keep a durable log row only when something changed — else drop the
+	// running row we created, so 96 no-op fast passes/day don't evict visible history.
+	store.UpdateLastSyncAt(config.UserID)
+	if result.Created+result.Updated+result.Deleted+result.Errors > 0 {
+		syncLog.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+		syncLog.Created = result.Created
+		syncLog.Updated = result.Updated
+		syncLog.Deleted = result.Deleted
+		syncLog.Errors = result.Errors
+		syncLog.Status = "completed"
+		if result.Errors > 0 {
+			syncLog.Status = "completed_with_errors"
+			if b, e := json.Marshal(result.ErrorDetails); e == nil {
+				syncLog.ErrorDetails = string(b)
+			}
+		}
+		if result.PerCalendar != nil {
+			if b, e := json.Marshal(result.PerCalendar); e == nil {
+				syncLog.Details = string(b)
+			}
+		}
+		store.UpdateSyncLog(syncLog)
+	} else if err := store.DeleteSyncLog(syncLog.ID); err != nil {
+		log.Printf("failed to drop no-op fast sync log: %v", err)
+	}
+
+	log.Printf("fast sync user=%s created=%d updated=%d deleted=%d errors=%d",
+		config.UserID, result.Created, result.Updated, result.Deleted, result.Errors)
+	result.Message = fmt.Sprintf("Fast sync: %d created, %d updated, %d deleted",
+		result.Created, result.Updated, result.Deleted)
+	if result.Errors > 0 {
+		result.Message += fmt.Sprintf(", %d errors", result.Errors)
+	}
+	return result, nil
+}
+
+// applyEventFastPath reconciles one changed source event across the hub and every other
+// source calendar. It builds every placeholder from the SOURCE event (not the hub copy)
+// so both tiers agree, and keeps or deletes based on shouldKeepEvent.
+func applyEventFastPath(ctx context.Context, cal *calendar.Client, token string, store *Store, config *SyncConfig, srcCalID string, e GCalEvent, sources []SourceCalendar, timeMin, timeMax time.Time, result *SyncResult) {
+	// Our own outbound placeholders reappear in a source calendar's delta on the next
+	// pass; never sync them (and skip the point-gets that would conclude the same).
+	if IsPlaceholder(e) {
+		return
+	}
+	keep := shouldKeepEvent(e, timeMin, timeMax)
+
+	// Inbound: the hub placeholder.
+	hub := BuildPlaceholder(e, srcCalID, e.ID, e.Updated, PlaceholderOptions{})
+	upsertMappingFastPath(ctx, cal, token, store, config.UserID, srcCalID, e.ID, config.HubCalendarID, hub, e.Updated, keep, result)
+
+	// Outbound: a placeholder on every OTHER source calendar (no self-sync).
+	for i := range sources {
+		t := &sources[i]
+		if t.CalendarID == srcCalID {
+			continue
+		}
+		p := BuildPlaceholder(e, srcCalID, e.ID, e.Updated, PlaceholderOptions{EmojiPrefix: t.EmojiPrefix, ColorID: t.ColorID})
+		upsertMappingFastPath(ctx, cal, token, store, config.UserID, srcCalID, e.ID, t.CalendarID, p, e.Updated, keep, result)
+	}
+}
+
+// upsertMappingFastPath point-gets the mapping for one (source event → target calendar)
+// pair and creates/updates/deletes the placeholder + record to match the desired state.
+// A failed delete keeps the record (retry next pass); a not-found update drops the record
+// so the next pass recreates it — mirroring the full pass.
+func upsertMappingFastPath(ctx context.Context, cal *calendar.Client, token string, store *Store, userID, srcCalID, srcEventID, targetCalID string, placeholder GCalEvent, srcUpdated string, keep bool, result *SyncResult) {
+	se, err := store.GetSyncedEventByKey(userID, srcCalID, srcEventID, targetCalID)
+	if err != nil {
+		result.addError("fast point-get mapping %s→%s: %v", srcEventID, targetCalID, err)
+		return
+	}
+
+	if !keep {
+		if se == nil {
+			return // no placeholder to remove
+		}
+		if err := cal.DeleteEvent(ctx, token, targetCalID, se.TargetEventID); err != nil {
+			if isPermissionError(err) {
+				return // read-only target now (UC-0047); leave the record, don't error
+			}
+			result.addError("fast delete placeholder on %s: %v", targetCalID, err)
+			return // keep the record; retry next pass
+		}
+		store.DeleteSyncedEvent(se.ID)
+		result.Deleted++
+		return
+	}
+
+	if se == nil {
+		created, err := cal.CreateEvent(ctx, token, targetCalID, &placeholder)
+		if err != nil {
+			if isPermissionError(err) {
+				return // read-only target calendar (UC-0047)
+			}
+			result.addError("fast create placeholder on %s: %v", targetCalID, err)
+			return
+		}
+		if err := store.CreateSyncedEvent(&SyncedEvent{
+			UserID: userID, SourceCalendarID: srcCalID, SourceEventID: srcEventID,
+			TargetCalendarID: targetCalID, TargetEventID: created.ID, SourceUpdated: srcUpdated,
+		}); err != nil {
+			result.addError("fast store mapping: %v", err)
+			return
+		}
+		result.Created++
+		return
+	}
+
+	if srcUpdated != "" && srcUpdated != se.SourceUpdated {
+		if _, err := cal.UpdateEvent(ctx, token, targetCalID, se.TargetEventID, &placeholder); err != nil {
+			if isNotFoundError(err) {
+				store.DeleteSyncedEvent(se.ID) // placeholder gone; recreate next pass
+				return
+			}
+			if isPermissionError(err) {
+				return
+			}
+			result.addError("fast update placeholder on %s: %v", targetCalID, err)
+			return
+		}
+		se.SourceUpdated = srcUpdated
+		if err := store.UpdateSyncedEvent(se); err != nil {
+			log.Printf("failed to update mapping: %v", err)
+		}
+		result.Updated++
+	}
+}
+
+// shouldKeepEvent reports whether a source event should have placeholders — matching the
+// full pass's inbound filter exactly (so the two tiers converge), plus the window (the
+// full pass fetches windowed; the fast pass's token stream is unbounded in time).
+func shouldKeepEvent(e GCalEvent, timeMin, timeMax time.Time) bool {
+	if e.Status == "cancelled" {
+		return false
+	}
+	if IsDeclined(e) {
+		return false
+	}
+	if IsPlaceholder(e) {
+		return false
+	}
+	if shouldSkipEventType(e.EventType) {
+		return false
+	}
+	return eventInWindow(e, timeMin, timeMax)
+}
+
+// eventInstant parses an event time (dateTime or all-day date). ok is false if neither
+// is parseable.
+func eventInstant(t calendar.EventTime) (time.Time, bool) {
+	if t.DateTime != "" {
+		if v, err := time.Parse(time.RFC3339, t.DateTime); err == nil {
+			return v, true
+		}
+	}
+	if t.Date != "" {
+		if v, err := time.Parse("2006-01-02", t.Date); err == nil {
+			return v, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// eventInWindow reports whether an event overlaps [timeMin, timeMax). Used to apply the
+// sync window client-side after ListEventsForSync (whose token read is unwindowed) and
+// to the incremental fast-pass stream (a token stream is unbounded in time). An event
+// with unparseable times is included (conservative — better to sync than silently drop).
+func eventInWindow(e GCalEvent, timeMin, timeMax time.Time) bool {
+	start, okS := eventInstant(e.Start)
+	end, okE := eventInstant(e.End)
+	if !okS || !okE {
+		return true
+	}
+	return start.Before(timeMax) && end.After(timeMin)
+}
+
 // shouldSkipEventType returns true for event types that should not be synced.
-// workingLocation is an account-specific feature that cannot be created as a
-// regular event on all calendar types. outOfOffice and focusTime are synced
-// because they intentionally block time to prevent meetings.
+// workingLocation is an account-specific feature that cannot be created as a regular
+// event on all calendar types. outOfOffice and focusTime are synced because they
+// intentionally block time to prevent meetings.
 func shouldSkipEventType(eventType string) bool {
 	return eventType == "workingLocation"
 }
