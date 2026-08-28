@@ -194,6 +194,24 @@ Firestore emulator, then run it against prod non-destructively (old collection i
 rollback until `delete-old`); deploy Phase 3 to prod and let the read-count instrumentation
 confirm the drop. No standing staging instance.
 
+## Known limitations of the two-tier implementation (deferred)
+Surfaced in review; low impact for a single user, left for follow-up:
+- **`ColorID: "source"` diverges by tier.** The fast pass builds outbound placeholders from
+  the source event (correct source color); the full pass builds from the hub placeholder,
+  which carries no `colorId`, so a placeholder created by a full pass gets no color. They
+  don't fight (the `sourceUpdated` compare converges), so a placeholder just keeps whichever
+  tier last wrote it. Explicit `colorId`s (1–11) are unaffected — both tiers set them.
+- **Per-calendar log attribution differs by tier.** The fast pass books all of a delta's
+  writes (hub + outbound) under the originating source; the full pass books outbound writes
+  under the target. The per-calendar breakdown means slightly different things by tier.
+- **A config change during an in-flight full pass can be swallowed.** `SetLastFullSyncAt`
+  re-reads config, so a `PutConfig` clear that lands mid-pass is overwritten by the pass's
+  completion stamp; a narrowed window/removed source could wait up to a full-pass interval
+  (adding a source is still covered by the tokenless→full promotion). A compare-and-set on
+  `LastFullSyncAt` would close it.
+- **Full-pass staggering across users** (hash `userID` → offset) is unimplemented — moot at
+  single-user scale, needed before multi-user to avoid one nudge carrying N full passes.
+
 ## Deferred / out of scope
 - Moving the mapping off Firestore entirely (derive from hub placeholders) — a more radical
   alternative to two-tier that eliminates the collection; recorded as a future option.

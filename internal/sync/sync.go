@@ -210,20 +210,34 @@ func syncSourceToHub(ctx context.Context, cal *calendar.Client, token string, st
 	timeMin := now
 	timeMax := now.Add(time.Duration(syncDays) * 24 * time.Hour)
 
-	// 1. Full pass: re-list the whole calendar with ListEventsForSync to (re-)establish
-	// a sync token — a windowed events.list yields none (see calendar.ListEventsForSync)
-	// — then filter to the window client-side. This refreshes the token every full pass
-	// (so the fast pass can go incremental) and slides the window forward.
-	res, err := cal.ListEventsForSync(ctx, token, source.CalendarID)
-	if err != nil {
-		return fmt.Errorf("fetching events from %s: %w", source.CalendarName, err)
-	}
-	newSyncToken := res.SyncToken
+	// 1. Fetch source events for reconciliation.
 	var sourceEvents []GCalEvent
-	for _, e := range res.Events {
-		if eventInWindow(e, timeMin, timeMax) {
-			sourceEvents = append(sourceEvents, e)
+	var newSyncToken string
+	if source.SyncToken == "" {
+		// Bootstrap: no token yet, so establish one with an unwindowed ListEventsForSync
+		// (a windowed events.list yields none — see calendar.ListEventsForSync) and filter
+		// to the window client-side. This is the expensive path, taken only until a token
+		// exists; the fast pass then rolls it forward each interval.
+		res, err := cal.ListEventsForSync(ctx, token, source.CalendarID)
+		if err != nil {
+			return fmt.Errorf("bootstrapping sync for %s: %w", source.CalendarName, err)
 		}
+		newSyncToken = res.SyncToken
+		for _, e := range res.Events {
+			if eventInWindow(e, timeMin, timeMax) {
+				sourceEvents = append(sourceEvents, e)
+			}
+		}
+	} else {
+		// A token already exists (maintained by the fast pass), so reconciliation only
+		// needs the window: a cheap windowed read. It returns no token, so the existing
+		// one is preserved (step 7 skips persisting an empty token).
+		res, err := cal.ListEvents(ctx, token, source.CalendarID, timeMin, timeMax)
+		if err != nil {
+			return fmt.Errorf("fetching events from %s: %w", source.CalendarName, err)
+		}
+		newSyncToken = res.SyncToken // "" for a windowed read
+		sourceEvents = res.Events
 	}
 
 	// 2. Fetch existing placeholders on hub for this source
@@ -803,44 +817,50 @@ func upsertMappingFastPath(ctx context.Context, cal *calendar.Client, token stri
 		return
 	}
 
-	if se == nil {
-		created, err := cal.CreateEvent(ctx, token, targetCalID, &placeholder)
-		if err != nil {
-			if isPermissionError(err) {
-				return // read-only target calendar (UC-0047)
+	// A mapping exists and the source changed: update. If the placeholder was manually
+	// deleted (404), drop the stale mapping and fall through to recreate now — the event
+	// won't reappear in a later delta (the token rolls past it), so waiting for the full
+	// pass would leave it unsynced for up to a day.
+	if se != nil && srcUpdated != "" && srcUpdated != se.SourceUpdated {
+		_, err := cal.UpdateEvent(ctx, token, targetCalID, se.TargetEventID, &placeholder)
+		switch {
+		case err == nil:
+			se.SourceUpdated = srcUpdated
+			if e := store.UpdateSyncedEvent(se); e != nil {
+				log.Printf("failed to update mapping: %v", e)
 			}
-			result.addError("fast create placeholder on %s: %v", targetCalID, err)
+			result.Updated++
 			return
-		}
-		if err := store.CreateSyncedEvent(&SyncedEvent{
-			UserID: userID, SourceCalendarID: srcCalID, SourceEventID: srcEventID,
-			TargetCalendarID: targetCalID, TargetEventID: created.ID, SourceUpdated: srcUpdated,
-		}); err != nil {
-			result.addError("fast store mapping: %v", err)
+		case isNotFoundError(err):
+			store.DeleteSyncedEvent(se.ID)
+			se = nil // recreate below
+		case isPermissionError(err):
 			return
-		}
-		result.Created++
-		return
-	}
-
-	if srcUpdated != "" && srcUpdated != se.SourceUpdated {
-		if _, err := cal.UpdateEvent(ctx, token, targetCalID, se.TargetEventID, &placeholder); err != nil {
-			if isNotFoundError(err) {
-				store.DeleteSyncedEvent(se.ID) // placeholder gone; recreate next pass
-				return
-			}
-			if isPermissionError(err) {
-				return
-			}
+		default:
 			result.addError("fast update placeholder on %s: %v", targetCalID, err)
 			return
 		}
-		se.SourceUpdated = srcUpdated
-		if err := store.UpdateSyncedEvent(se); err != nil {
-			log.Printf("failed to update mapping: %v", err)
-		}
-		result.Updated++
+	} else if se != nil {
+		return // exists and unchanged — no-op
 	}
+
+	// se == nil (never existed, or its placeholder was just found missing): create.
+	created, err := cal.CreateEvent(ctx, token, targetCalID, &placeholder)
+	if err != nil {
+		if isPermissionError(err) {
+			return // read-only target calendar (UC-0047)
+		}
+		result.addError("fast create placeholder on %s: %v", targetCalID, err)
+		return
+	}
+	if err := store.CreateSyncedEvent(&SyncedEvent{
+		UserID: userID, SourceCalendarID: srcCalID, SourceEventID: srcEventID,
+		TargetCalendarID: targetCalID, TargetEventID: created.ID, SourceUpdated: srcUpdated,
+	}); err != nil {
+		result.addError("fast store mapping: %v", err)
+		return
+	}
+	result.Created++
 }
 
 // shouldKeepEvent reports whether a source event should have placeholders — matching the

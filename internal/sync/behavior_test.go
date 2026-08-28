@@ -104,16 +104,15 @@ func TestFullSyncCreatesPlaceholderAndConverges(t *testing.T) {
 		t.Fatalf("second pass changed the hub placeholder set")
 	}
 
-	// The full pass now does a token-establishing ListEventsForSync per source (an
-	// unrestricted read, counted as FullSyncList) rather than a windowed read, and never
-	// goes incremental (that's the fast pass's job). It still scans the Firestore mapping
-	// — the full pass is the reconciliation backstop; the fast pass is where reads drop.
+	// Pass 1 bootstrapped the token (an unrestricted FullSyncList read); pass 2, now that
+	// a token exists, reconciles with a cheap WINDOWED read per source and preserves the
+	// token — no repeated unwindowed bootstrap, and never incremental (the fast pass's job).
 	counts := fake.Counts()
 	if counts.Incremental != 0 {
 		t.Fatalf("full pass should not go incremental, counts=%+v", counts)
 	}
-	if counts.FullSyncList != len(sources) {
-		t.Fatalf("full pass should do one token-establishing read per source (%d), counts=%+v", len(sources), counts)
+	if counts.WindowList != len(sources) || counts.FullSyncList != 0 {
+		t.Fatalf("a full pass with a token should do one windowed read per source, counts=%+v", counts)
 	}
 	if store.Reads() <= readsBefore {
 		t.Fatalf("expected the full pass to read the mapping (reads went %d→%d)", readsBefore, store.Reads())
@@ -589,6 +588,72 @@ func TestConfigChangeForcesFullPass(t *testing.T) {
 	}
 	if !FullPassDue(cfg, now) {
 		t.Fatal("after a config change, a full pass must be due")
+	}
+}
+
+func TestFastPassExpiredTokenClearsAndPromotes(t *testing.T) {
+	const (
+		hubID, aID, token = "hub@x", "a@x", "tok"
+	)
+	ctx := context.Background()
+	store, fake, reload := fastSyncSetup(t, aID)
+	start := time.Now().Add(48 * time.Hour).UTC()
+	evID := fake.SeedEvent(aID, calendar.GCalEvent{
+		Summary: "E",
+		Start:   calendar.EventTime{DateTime: start.Format(time.RFC3339)},
+		End:     calendar.EventTime{DateTime: start.Add(time.Hour).Format(time.RFC3339)},
+	})
+	cfg, sources := reload()
+	if _, err := RunSync(ctx, fake.Client(), token, store, cfg, sources); err != nil {
+		t.Fatalf("full pass: %v", err)
+	}
+
+	// Expire the token and edit the event. The fast pass gets a 410, clears the token,
+	// and skips the source this pass.
+	fake.ExpireTokens(aID)
+	fake.SeedEvent(aID, calendar.GCalEvent{ID: evID, Summary: "E edited",
+		Start: calendar.EventTime{DateTime: start.Format(time.RFC3339)},
+		End:   calendar.EventTime{DateTime: start.Add(time.Hour).Format(time.RFC3339)}})
+	cfg, sources = reload()
+	if _, err := RunSyncWithOptions(ctx, fake.Client(), token, store, cfg, sources, SyncOptions{Fast: true}); err != nil {
+		t.Fatalf("fast pass (410): %v", err)
+	}
+	if src, _ := store.GetSources("u1"); src[0].SyncToken != "" {
+		t.Fatal("an expired-token fast pass must clear the token")
+	}
+
+	// The next fast pass now sees no token → promotes to a full pass → applies the edit.
+	cfg, sources = reload()
+	if _, err := RunSyncWithOptions(ctx, fake.Client(), token, store, cfg, sources, SyncOptions{Fast: true}); err != nil {
+		t.Fatalf("promoted pass: %v", err)
+	}
+	if got := placeholdersOn(fake, hubID)[0].Summary; got != "E edited" {
+		t.Fatalf("promoted full pass should apply the edit, summary=%q", got)
+	}
+}
+
+func TestFastPassBacksOffWhenSyncRunning(t *testing.T) {
+	const (
+		aID, token = "a@x", "tok"
+	)
+	ctx := context.Background()
+	store, fake, reload := fastSyncSetup(t, aID)
+	start := time.Now().Add(48 * time.Hour).UTC()
+	fake.SeedEvent(aID, calendar.GCalEvent{Summary: "E",
+		Start: calendar.EventTime{DateTime: start.Format(time.RFC3339)},
+		End:   calendar.EventTime{DateTime: start.Add(time.Hour).Format(time.RFC3339)}})
+	cfg, sources := reload()
+	if _, err := RunSync(ctx, fake.Client(), token, store, cfg, sources); err != nil {
+		t.Fatalf("full pass: %v", err)
+	}
+
+	// A concurrent sync is in progress (a running log row).
+	if err := store.CreateSyncLog(&SyncLog{UserID: "u1", StartedAt: time.Now().UTC().Format(time.RFC3339), Status: "running", Kind: "full"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, sources = reload()
+	if _, err := RunSyncWithOptions(ctx, fake.Client(), token, store, cfg, sources, SyncOptions{Fast: true}); err == nil {
+		t.Fatal("fast pass should back off while another sync is running")
 	}
 }
 
