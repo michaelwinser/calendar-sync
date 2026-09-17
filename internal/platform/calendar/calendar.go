@@ -232,6 +232,11 @@ func (c *Client) ListEventsIncremental(ctx context.Context, token, calendarID, s
 	for {
 		params := url.Values{}
 		params.Set("syncToken", syncToken)
+		// MUST match the initial ListEventsForSync request's params, or Google 410s the
+		// token ("full sync required"). singleEvents is allowed alongside a sync token
+		// (unlike timeMin/timeMax/orderBy); it just has to be consistent between the
+		// bootstrap and every incremental fetch.
+		params.Set("singleEvents", "true")
 		if pageToken != "" {
 			params.Set("pageToken", pageToken)
 		}

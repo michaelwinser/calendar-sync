@@ -223,6 +223,7 @@ func syncSourceToHub(ctx context.Context, cal *calendar.Client, token string, st
 			return fmt.Errorf("bootstrapping sync for %s: %w", source.CalendarName, err)
 		}
 		newSyncToken = res.SyncToken
+		log.Printf("m8-diag bootstrap cal=%s events=%d tokenLen=%d", source.CalendarID, len(res.Events), len(newSyncToken))
 		for _, e := range res.Events {
 			if eventInWindow(e, timeMin, timeMax) {
 				sourceEvents = append(sourceEvents, e)
@@ -684,6 +685,7 @@ func runFastPass(ctx context.Context, cal *calendar.Client, token string, store 
 	}
 
 	result := &SyncResult{}
+	readsBefore := store.Reads()
 	syncDays := opts.SyncDays
 	if syncDays <= 0 {
 		syncDays = config.SyncWindowWeeks * 7
@@ -697,6 +699,11 @@ func runFastPass(ctx context.Context, cal *calendar.Client, token string, store 
 	for i := range sources {
 		source := &sources[i]
 		res, err := cal.ListEventsIncremental(ctx, token, source.CalendarID, source.SyncToken)
+		if err == nil {
+			log.Printf("m8-diag incr cal=%s changed=%d newTokenLen=%d", source.CalendarID, len(res.Events), len(res.SyncToken))
+		} else {
+			log.Printf("m8-diag incr cal=%s err=%v", source.CalendarID, err)
+		}
 		if errors.Is(err, ErrSyncTokenExpired) {
 			// Clear the token so the next nudge takes the full-pass branch above to
 			// re-establish it and reconcile — cheaper than replaying the whole calendar.
@@ -754,8 +761,8 @@ func runFastPass(ctx context.Context, cal *calendar.Client, token string, store 
 		log.Printf("failed to drop no-op fast sync log: %v", err)
 	}
 
-	log.Printf("fast sync user=%s created=%d updated=%d deleted=%d errors=%d",
-		config.UserID, result.Created, result.Updated, result.Deleted, result.Errors)
+	log.Printf("fast sync user=%s firestore_reads~=%d created=%d updated=%d deleted=%d errors=%d",
+		config.UserID, store.Reads()-readsBefore, result.Created, result.Updated, result.Deleted, result.Errors)
 	result.Message = fmt.Sprintf("Fast sync: %d created, %d updated, %d deleted",
 		result.Created, result.Updated, result.Deleted)
 	if result.Errors > 0 {
