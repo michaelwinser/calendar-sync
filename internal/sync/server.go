@@ -365,7 +365,6 @@ func (s *Server) NudgeSync(w http.ResponseWriter, r *http.Request) {
 		// config change). The full pass re-establishes sync tokens and slides the window.
 		syncDays := cfg.SyncWindowWeeks * 7
 		opts := SyncOptions{SyncDays: syncDays, Fast: !FullPassDue(&cfg, now)}
-		log.Printf("m8-diag nudge user=%s fast=%v lastFullSyncAt=%q", cfg.UserID, opts.Fast, cfg.LastFullSyncAt)
 		if _, err := RunSyncWithOptions(r.Context(), s.Cal, token, s.Store, &cfg, sources, opts); err != nil {
 			msg := fmt.Sprintf("user %s: sync failed: %v", cfg.UserID, err)
 			log.Printf("nudge: %s", msg)
