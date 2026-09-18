@@ -684,6 +684,7 @@ func runFastPass(ctx context.Context, cal *calendar.Client, token string, store 
 	}
 
 	result := &SyncResult{}
+	readsBefore := store.Reads()
 	syncDays := opts.SyncDays
 	if syncDays <= 0 {
 		syncDays = config.SyncWindowWeeks * 7
@@ -754,8 +755,8 @@ func runFastPass(ctx context.Context, cal *calendar.Client, token string, store 
 		log.Printf("failed to drop no-op fast sync log: %v", err)
 	}
 
-	log.Printf("fast sync user=%s created=%d updated=%d deleted=%d errors=%d",
-		config.UserID, result.Created, result.Updated, result.Deleted, result.Errors)
+	log.Printf("fast sync user=%s firestore_reads~=%d created=%d updated=%d deleted=%d errors=%d",
+		config.UserID, store.Reads()-readsBefore, result.Created, result.Updated, result.Deleted, result.Errors)
 	result.Message = fmt.Sprintf("Fast sync: %d created, %d updated, %d deleted",
 		result.Created, result.Updated, result.Deleted)
 	if result.Errors > 0 {

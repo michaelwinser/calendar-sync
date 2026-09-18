@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -132,6 +133,29 @@ func TestBatchDeleteAttributesByContentID(t *testing.T) {
 	}
 	if !res.Failed["a"] || res.Failed["b"] {
 		t.Fatalf("a (item0, 403) should be Failed and b should not: %+v", res)
+	}
+}
+
+// The incremental request MUST carry singleEvents=true so it matches the initial
+// ListEventsForSync request — otherwise Google 410s the sync token and incremental sync
+// loops forever (the two-tier prod bug). This guards that param.
+func TestListEventsIncrementalMatchesBootstrapParams(t *testing.T) {
+	var got url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()
+		w.Write([]byte(`{"items":[],"nextSyncToken":"tok2"}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	if _, err := c.ListEventsIncremental(context.Background(), "t", "cal", "tok1"); err != nil {
+		t.Fatal(err)
+	}
+	if got.Get("syncToken") != "tok1" {
+		t.Fatalf("syncToken = %q, want tok1", got.Get("syncToken"))
+	}
+	if got.Get("singleEvents") != "true" {
+		t.Fatalf("incremental must send singleEvents=true (matching the bootstrap), got %q", got.Get("singleEvents"))
 	}
 }
 
