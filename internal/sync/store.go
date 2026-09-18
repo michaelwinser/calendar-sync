@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"fmt"
 	"log"
 	"sort"
 	"sync/atomic"
@@ -297,11 +298,18 @@ func (s *Store) GetAllConfigs() ([]SyncConfig, error) {
 	return all, err
 }
 
-// UpdateSourceSyncToken persists the syncToken for a source calendar.
+// UpdateSourceSyncToken persists the syncToken for a source calendar. It looks the
+// record up by point Get on the pk (doc id) — NOT Where("id",...): Firestore doesn't
+// store the pk as a queryable field (it's the doc id), so a Where by id silently matches
+// nothing there and the write is lost. SQLite stores it as a column, which is why this
+// only bit in prod and not in tests.
 func (s *Store) UpdateSourceSyncToken(id, syncToken string) error {
-	src, err := s.Sources.Where("id", "==", id).First()
-	if err != nil || src == nil {
+	src, err := s.Sources.Get(id)
+	if err != nil {
 		return err
+	}
+	if src == nil {
+		return fmt.Errorf("source calendar %s not found", id)
 	}
 	src.SyncToken = syncToken
 	return s.Sources.Update(id, src)

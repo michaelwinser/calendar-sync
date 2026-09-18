@@ -657,6 +657,32 @@ func TestFastPassBacksOffWhenSyncRunning(t *testing.T) {
 	}
 }
 
+// TestUpdateSourceSyncTokenPersists guards token persistence. (The Firestore-specific
+// failure — Where-by-pk matching nothing — can't be reproduced on SQLite, where the pk is
+// a real column; but this catches a silent no-op on a missing source, and regressions in
+// the point-Get round-trip.)
+func TestUpdateSourceSyncTokenPersists(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.SaveConfig("u1", SaveConfigInput{HubCalendarID: "hub@x", SyncWindowWeeks: 8}); err != nil {
+		t.Fatal(err)
+	}
+	sources, err := store.ReconcileSources("u1", []SourceCalendarInput{{CalendarID: "a@x", CalendarName: "A"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateSourceSyncToken(sources[0].ID, "tok-xyz"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := store.GetSources("u1")
+	if got[0].SyncToken != "tok-xyz" {
+		t.Fatalf("sync token not persisted, got %q", got[0].SyncToken)
+	}
+	// An unknown source must error, not silently succeed (the old Where-by-pk path did).
+	if err := store.UpdateSourceSyncToken("does-not-exist", "x"); err == nil {
+		t.Fatal("updating an unknown source should error")
+	}
+}
+
 func TestFullPassDue(t *testing.T) {
 	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 	if !FullPassDue(&SyncConfig{LastFullSyncAt: ""}, now) {
