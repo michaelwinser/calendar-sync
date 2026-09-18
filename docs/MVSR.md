@@ -68,6 +68,8 @@ Rather than doing pairwise sync across all selected calendars (which scales as O
 
 Beyond sync, the app has grown a second useful capability — a **Tools** page for bulk event search/delete — and will gain further calendar utilities (starting with a usage **heatmap**). These tools share little at the feature level but share the *expensive* substrate: one Google OAuth client, one authenticated session, one Calendar client, one deployment. The app is therefore evolving into a **modular calendar workbench** — independent tool modules (sync, tools, heatmap, …) behind shared auth, each owning its own routes and its own data namespace. See [DESIGN-platform.md](DESIGN-platform.md) for the architecture. Splitting into separate deployed apps is reserved for a real forcing function (a different OAuth scope, a different audience, or a heavier runtime), not the default.
 
+**Persistence direction.** Firestore's per-operation read billing and its single-`Where`-pushdown query model proved a poor fit for sync's relational, query-heavy workload — the entire M8 effort (point-lookup re-key, two-tier sync) exists to work around it, and the two production bugs that milestone hit were both SQLite-vs-Firestore divergences. The intended direction is to consolidate query-heavy apps like this onto a shared managed **Postgres**, keeping SQLite for simple single-node apps, and running dev on the same engine as prod to eliminate that divergence class. Not yet scheduled.
+
 ## Roadmap
 
 > This roadmap is illustrative, not the formal engineering or product plan. It shows a reasonable progression of capabilities and outcomes towards the end goal.
@@ -82,4 +84,4 @@ Beyond sync, the app has grown a second useful capability — a **Tools** page f
 | **M5** | Polish and enhancements as determined during development. |
 | **M6** | Modular foundation: extract the Tools (bulk search/delete) into its own module behind a shared calendar/bulk-ops layer, and fix bulk delete for large selections (client-chunked progress, bounded concurrency). |
 | **M7** | Heatmap module: bring the weekly-occupancy heatmap into the app (read-only), retiring the standalone Apps Script version. |
-| **M8** | Modularize sync into `internal/sync`, migrate its data to module-owned, prefixed, point-lookup-keyed collections, and use that key to make sync two-tier (cheap incremental fast pass + periodic full reconciliation) — the real fix for the Firestore read cost. Highest-risk milestone (live data); staged. |
+| **M8** | Modularize sync into `internal/sync`, migrate its data to module-owned, prefixed, point-lookup-keyed collections, and use that key to make sync two-tier (cheap incremental fast pass + periodic full reconciliation) — the real fix for the Firestore read cost. Highest-risk milestone (live data); staged. **✅ Completed & deployed (Sept 2026): per-sync reads ~4,071 → ~88.** See `docs/M8-plan.md` for the outcome and the two prod bugs. |

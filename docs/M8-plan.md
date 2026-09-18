@@ -20,8 +20,33 @@ covered by the **local Firestore emulator** (`FIRESTORE_EMULATOR_HOST`), seeded 
 prod export. The real migration then runs directly against prod, non-destructively, gated
 by a PITR snapshot + `--dry-run` + `verify`.
 
-> Status: architecture-reviewed once → **REVISE**; this revision folds in all 7
-> BLOCKING items and the advisories. Re-run the architecture review before building.
+## Outcome (shipped Sept 2026)
+
+Completed and deployed. The migration ran clean (1329 `synced_events`, 4 `source_calendars`,
+0 collisions); the foundation and the two-tier fast pass were both validated in prod. **Result:
+per-sync Firestore reads dropped from ~4,071 to ~88** on an active fast pass (lower when idle) —
+the full 3N scan now runs at most once/day per user, not every interval.
+
+**Two prod-only bugs, both SQLite-vs-Firestore divergences the unit tests couldn't catch** (see
+`CLAUDE.md` → "Store backend gotchas"):
+
+1. **BLOCKING-5, implemented wrong.** `ListEventsIncremental` didn't send `singleEvents=true` to
+   match the token-establishing `ListEventsForSync` request. Google requires the incremental
+   request's params to match the initial sync's, so it `410`'d the token on every incremental →
+   the fast pass cleared it → next pass had no token → promoted to a full pass → re-established →
+   `410` again, forever. Every pass stayed a full 3N scan. Fix: send `singleEvents=true` on the
+   incremental request too.
+2. **Token persistence silently no-op'd.** `UpdateSourceSyncToken` looked the source up with
+   `Where("id","==",id).First()`, but Firestore doesn't store the pk as a queryable field, so the
+   query matched nothing and the token was never written. (SQLite stores the pk as a column, so
+   tests passed.) Fix: `Sources.Get(id)` — a point Get on the doc id.
+
+Both were only observable against prod Firestore; the fake-Google harness validated the *logic*
+on top of an assumption about Google's token behavior that was wrong. Lesson: rehearse token/pk
+paths against the real API or the Firestore emulator, not just SQLite.
+
+Diagnostics-driven debugging (temporary `m8-diag` logging + a `firestore_reads~=` line on the fast
+pass) pinpointed both. Deferred limitations are listed at the end.
 
 ## Background (why the reads are high)
 

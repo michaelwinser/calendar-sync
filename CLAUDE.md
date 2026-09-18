@@ -59,6 +59,15 @@ The sandbox extends the `claude-code` profile with:
 - **No local mode**: This app always requires Google OAuth — do not use appbase's `LocalMode`. Every code path assumes an authenticated user with calendar scopes.
 - **Devcontainer for non-Go tooling**: All tools other than Go run in the devcontainer (oapi-codegen, etc.). If a new tool is needed, ask before adding it.
 
+## Store backend gotchas (SQLite dev vs. Firestore prod)
+
+The appbase store abstraction leaks: unit tests run on SQLite but prod is Firestore, and they diverge. Two of these caused prod-only bugs in M8 that SQLite tests couldn't catch.
+
+- **Look up a record by its pk with `collection.Get(id)`, never `collection.Where("id","==",id)`.** Firestore stores the pk as the *doc id*, not a queryable field, so a Where-by-pk silently matches nothing there (it works on SQLite, where the pk is a real column). This silently no-op'd sync-token persistence in prod.
+- **`create` is an upsert on Firestore (`Doc.Set`) but an `INSERT` on SQLite** (errors on a duplicate pk). Code that may re-create the same key needs a Get-then-update upsert to be idempotent on both.
+- **`.Where(...).All()` pushes only the *first* `Where` to Firestore** — remaining filters and any limit are applied in-memory, so every scan reads (and Firestore *bills*) the full first-Where match set. This billing model is what the M8 two-tier work exists to avoid.
+- When changing a pk-based lookup or a create-idempotency assumption, **rehearse against the Firestore emulator** (`FIRESTORE_EMULATOR_HOST`) — SQLite green does not mean Firestore-correct.
+
 ## Tech Stack
 
 - **Backend**: Go, appbase (chi router, SQLite, Google OAuth)
