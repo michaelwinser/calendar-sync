@@ -121,6 +121,7 @@ Move sync into its own module, re-key + namespace its data, and split sync into 
 | UC-0092 | Config changes don't wait for the full pass | Removing a source calendar, changing the hub, or shrinking the window forces a full pass on the next run, not on the next daily cycle. |
 | UC-0093 | Migration preserves every mapping | The collection migration is idempotent, detects and resolves 4-tuple key collisions, and after cut-over every prior mapping still resolves to a live Google placeholder. |
 | UC-0094 | Sync owns its namespace | Sync's collections are `sync_`-prefixed and owned by `internal/sync`; no other module reads them (NFR-07). |
+| UC-0095 | Sync status stays visible when idle | An idle fast pass writes no durable log row (to avoid evicting history), so the UI surfaces a `LastSyncAt` heartbeat ("Last synced …") separate from the log table, and tags each log row with its fast/full kind. The heartbeat shows sync is alive even when the log table has no recent entries. |
 
 ## Future Considerations
 
@@ -161,4 +162,4 @@ Track implementation status here. E2e tests for all "done" use cases must pass i
 | M5 | UC-0050 – UC-0060 | implemented (manual only); e2e status audit pending |
 | M6 | UC-0070 – UC-0074 | done (UC-0070–0073 unit-tested; browser/live-Google validation manual) |
 | M7 | UC-0080 – UC-0084 | done (UC-0081 tested via the endpoint seam; UC-0080/0082/0083 browser/live-Google manual; UC-0084 e2e) |
-| M8 | UC-0090 – UC-0094 | not started |
+| M8 | UC-0090 – UC-0095 | done (UC-0090/0091/0092 behaviour-tested via the fake-Google harness; UC-0093 migration unit-tested + run in prod; UC-0094 structural; UC-0095 UI. Migration + two-tier validated live Sept 2026 — see docs/M8-plan.md) |
