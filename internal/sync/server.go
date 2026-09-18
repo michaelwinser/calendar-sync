@@ -55,6 +55,7 @@ type configResponse struct {
 	HubCalendarName     string               `json:"hubCalendarName"`
 	SyncWindowWeeks     int                  `json:"syncWindowWeeks"`
 	SyncIntervalMinutes int                  `json:"syncIntervalMinutes"`
+	LastSyncAt          string               `json:"lastSyncAt,omitempty"` // heartbeat: idle fast passes update this but write no log row
 	Sources             []sourceCalendarView `json:"sources"`
 }
 
@@ -95,6 +96,7 @@ func (s *Server) GetConfig(w http.ResponseWriter, r *http.Request) {
 		resp.HubCalendarName = cfg.HubCalendarName
 		resp.SyncWindowWeeks = cfg.SyncWindowWeeks
 		resp.SyncIntervalMinutes = cfg.SyncIntervalMinutes
+		resp.LastSyncAt = cfg.LastSyncAt
 	}
 	for _, src := range sources {
 		resp.Sources = append(resp.Sources, sourceCalendarView{
@@ -182,6 +184,7 @@ func (s *Server) PutConfig(w http.ResponseWriter, r *http.Request) {
 		HubCalendarName:     cfg.HubCalendarName,
 		SyncWindowWeeks:     cfg.SyncWindowWeeks,
 		SyncIntervalMinutes: cfg.SyncIntervalMinutes,
+		LastSyncAt:          cfg.LastSyncAt,
 		Sources:             make([]sourceCalendarView, 0, len(sources)),
 	}
 	for _, src := range sources {

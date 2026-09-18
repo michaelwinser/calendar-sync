@@ -145,6 +145,7 @@ const homePage = `<!DOCTYPE html>
             <button id="sync-btn" onclick="runSync()">Sync Now</button>
             <span id="sync-status"></span>
         </div>
+        <div id="last-synced" style="color:#666;font-size:0.85rem;margin-top:0.5rem"></div>
         <div id="sync-logs" style="margin-top:0.75rem"></div>
     </div>
 
@@ -191,6 +192,17 @@ const homePage = `<!DOCTYPE html>
         const intervalSel = document.getElementById('sync-interval');
         if (windowSel) windowSel.value = config.syncWindowWeeks || 8;
         if (intervalSel) intervalSel.value = config.syncIntervalMinutes || 15;
+        renderLastSynced();
+    }
+
+    function renderLastSynced() {
+        const el = document.getElementById('last-synced');
+        if (!el) return;
+        if (config.lastSyncAt) {
+            el.textContent = 'Last synced ' + new Date(config.lastSyncAt).toLocaleString();
+        } else {
+            el.textContent = 'Not synced yet.';
+        }
     }
 
     async function saveSettings() {
@@ -428,10 +440,10 @@ const homePage = `<!DOCTYPE html>
             try { data = JSON.parse(text); } catch { data = null; }
             if (!res.ok) {
                 status.textContent = 'Error: ' + (data?.error || text || 'sync failed');
-            } else if (data) {
-                status.textContent = data.message;
             } else {
-                status.textContent = text;
+                status.textContent = data ? data.message : text;
+                config.lastSyncAt = new Date().toISOString();
+                renderLastSynced();
             }
             loadSyncLogs();
         } catch (e) {
@@ -456,7 +468,8 @@ const homePage = `<!DOCTYPE html>
                 const t = new Date(log.startedAt).toLocaleString();
                 const counts = log.created + ' new, ' + log.updated + ' upd, ' + log.deleted + ' del';
                 const s = log.errors > 0 ? counts + ', ' + log.errors + ' err' : counts;
-                html += '<tr style="border-bottom:1px solid #eee"><td>' + t + '</td><td>' + s + '</td><td>' + log.status + '</td></tr>';
+                const kind = '<span style="font-size:0.7rem;color:#999;text-transform:uppercase;margin-right:0.4rem">' + esc(log.kind || 'full') + '</span>';
+                html += '<tr style="border-bottom:1px solid #eee"><td>' + t + '</td><td>' + kind + s + '</td><td>' + log.status + '</td></tr>';
                 // Per-calendar breakdown
                 if (log.details) {
                     try {
